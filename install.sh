@@ -3,11 +3,11 @@ set -e
 
 # Install system dependencies
 sudo apt update
-sudo apt install -y python3-dev python3-venv build-essential libcap-dev
+sudo apt install -y python3-dev python3-venv build-essential libcap-dev libcamera-dev
 
-# Create virtual environment if it doesn't exist
+# Create virtual environment with system site packages to access libcamera
 if [ ! -d ".venv" ]; then
-    python3 -m venv .venv
+    python3 -m venv --system-site-packages .venv
 fi
 
 # Activate virtual environment and install packages
