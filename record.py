@@ -5,8 +5,8 @@ from picamera2 import Picamera2
 import quant
 
 BITS = 7
-H = 1920
-W = 1080
+H = 320
+W = 320
 C = 3
 
 picam2 = Picamera2()
