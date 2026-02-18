@@ -1,0 +1,12 @@
+# Build artifacts
+quant.c
+*.so
+build/
+
+# Virtual environment
+.venv/
+
+# Python cache
+__pycache__/
+*.pyc
+*.pyo
