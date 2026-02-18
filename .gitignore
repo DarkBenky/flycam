@@ -10,3 +10,6 @@ build/
 __pycache__/
 *.pyc
 *.pyo
+
+# Generated demo files
+comparison.png
