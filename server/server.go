@@ -1,0 +1,77 @@
+package main
+
+import (
+	"fmt"
+	"log"
+	"sync"
+	"time"
+
+	zmq "github.com/pebbe/zmq4"
+)
+
+const (
+	pullAddr = "tcp://*:5555"
+	pubAddr  = "tcp://*:5556"
+)
+
+var (
+	latestFrame []byte
+	mu          sync.RWMutex
+)
+
+func main() {
+	pull, err := zmq.NewSocket(zmq.PULL)
+	if err != nil {
+		log.Fatalf("Failed to create PULL socket: %v", err)
+	}
+	defer pull.Close()
+	if err := pull.Bind(pullAddr); err != nil {
+		log.Fatalf("Failed to bind PULL socket: %v", err)
+	}
+
+	pub, err := zmq.NewSocket(zmq.PUB)
+	if err != nil {
+		log.Fatalf("Failed to create PUB socket: %v", err)
+	}
+	defer pub.Close()
+	if err := pub.Bind(pubAddr); err != nil {
+		log.Fatalf("Failed to bind PUB socket: %v", err)
+	}
+
+	fmt.Printf("flycam server running\n")
+	fmt.Printf("  PULL %s\n", pullAddr)
+	fmt.Printf("  PUB  %s\n", pubAddr)
+
+	var totalBytes int64
+	var frameCount int64
+	lastLog := time.Now()
+
+	for {
+		data, err := pull.RecvBytes(0)
+		if err != nil {
+			log.Printf("Recv error: %v", err)
+			continue
+		}
+
+		mu.Lock()
+		latestFrame = data
+		mu.Unlock()
+
+		if _, err := pub.SendBytes(data, 0); err != nil {
+			log.Printf("Pub send error: %v", err)
+			continue
+		}
+
+		totalBytes += int64(len(data))
+		frameCount++
+
+		if elapsed := time.Since(lastLog); elapsed >= time.Second {
+			kbps := float64(totalBytes) / elapsed.Seconds() / 1024
+			fps := float64(frameCount) / elapsed.Seconds()
+			log.Printf("[go]  %.1f KB/s  %.1f fps", kbps, fps)
+			totalBytes = 0
+			frameCount = 0
+			lastLog = time.Now()
+		}
+	}
+}

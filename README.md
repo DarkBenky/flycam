@@ -4,7 +4,7 @@
 
 | Field Name  | Data Type   | Size (bytes) | Offset (bytes)  | Description                                  |
 |-------------|-------------|--------------|-----------------|----------------------------------------------|
-| timestamp   | uint32      | 4            | 0               | Timestamp in milliseconds since epoch        |
+| timestamp   | uint32      | 4            | 0               | Timestamp in seconds since epoch             |
 | width       | uint32      | 4            | 4               | Image width in pixels                        |
 | height      | uint32      | 4            | 8               | Image height in pixels                       |
 | channels    | uint8       | 1            | 12              | Number of color channels (3 for RGB)         |
