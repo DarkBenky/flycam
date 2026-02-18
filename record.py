@@ -2,7 +2,17 @@ import cv2
 import numpy as np
 from picamera2 import Picamera2
 
-import quant
+try:
+    import quant
+except ImportError:
+    import subprocess
+    import sys
+    print("Building Cython extension quant...")
+    subprocess.run(
+        [sys.executable, "setup.py", "build_ext", "--inplace"],
+        check=True
+    )
+    import quant
 
 BITS = 7
 H = 320

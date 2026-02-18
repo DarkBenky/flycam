@@ -1,5 +1,4 @@
-Cython==3.2.4
+Cython
 numpy
-setuptools==82.0.0
 opencv-python
 picamera2
