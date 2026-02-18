@@ -1,0 +1,12 @@
+# Virtual environment
+.venv/
+
+# Cython build artifacts
+quant.c
+*.so
+build/
+
+# Python
+__pycache__/
+*.pyc
+*.pyo

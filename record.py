@@ -2,7 +2,23 @@ import cv2
 import numpy as np
 from picamera2 import Picamera2
 
-import quant
+try:
+    import quant
+except ImportError:
+    import os
+    import subprocess
+    import sys
+    script_dir = os.path.dirname(os.path.abspath(__file__))
+    setup_py = os.path.join(script_dir, "setup.py")
+    try:
+        subprocess.run([sys.executable, setup_py, "build_ext", "--inplace"],
+                       check=True, cwd=script_dir)
+    except subprocess.CalledProcessError as e:
+        raise RuntimeError(
+            "Failed to build the Cython extension. "
+            "Make sure build dependencies are installed (run install.sh)."
+        ) from e
+    import quant
 
 BITS = 7
 H = 320
