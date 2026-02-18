@@ -8,7 +8,6 @@ cimport numpy as np
 ctypedef np.uint8_t u8
 
 def quantize_bitdepth(np.ndarray[u8, ndim=3] img, int bits):
-    """Legacy function: quantize all channels with same bit depth"""
     cdef int h = img.shape[0]
     cdef int w = img.shape[1]
     cdef int c = img.shape[2]
@@ -27,15 +26,6 @@ def quantize_bitdepth(np.ndarray[u8, ndim=3] img, int bits):
     return out
 
 def quantize_bitdepth_variable(np.ndarray[u8, ndim=3] img, list channel_bits):
-    """Quantize each channel with different bit depths
-    
-    Args:
-        img: Input image array (H, W, C)
-        channel_bits: List of bit depths for each channel (e.g., [5, 8, 6] for R, G, B)
-    
-    Returns:
-        Quantized image array
-    """
     cdef int h = img.shape[0]
     cdef int w = img.shape[1]
     cdef int c = img.shape[2]
@@ -56,7 +46,6 @@ def quantize_bitdepth_variable(np.ndarray[u8, ndim=3] img, list channel_bits):
     return out
 
 def pack_bits(np.ndarray[u8, ndim=3] img, int bits):
-    """Legacy function: pack all channels with same bit depth"""
     cdef Py_ssize_t total_vals = img.size
     cdef Py_ssize_t total_bits = total_vals * bits
     cdef Py_ssize_t total_bytes = (total_bits + 7) // 8
@@ -87,15 +76,6 @@ def pack_bits(np.ndarray[u8, ndim=3] img, int bits):
     return packed
 
 def pack_bits_variable(np.ndarray[u8, ndim=3] img, list channel_bits):
-    """Pack image with variable bit depths per channel
-    
-    Args:
-        img: Quantized image array (H, W, C)
-        channel_bits: List of bit depths for each channel (e.g., [5, 8, 6] for R, G, B)
-    
-    Returns:
-        Packed byte array
-    """
     cdef int h = img.shape[0]
     cdef int w = img.shape[1]
     cdef int c = img.shape[2]
@@ -103,7 +83,6 @@ def pack_bits_variable(np.ndarray[u8, ndim=3] img, list channel_bits):
     if len(channel_bits) != c:
         raise ValueError(f"channel_bits length ({len(channel_bits)}) must match image channels ({c})")
     
-    # Calculate total bits needed
     cdef Py_ssize_t bits_per_pixel = sum(channel_bits)
     cdef Py_ssize_t total_pixels = h * w
     cdef Py_ssize_t total_bits = total_pixels * bits_per_pixel
@@ -118,7 +97,6 @@ def pack_bits_variable(np.ndarray[u8, ndim=3] img, list channel_bits):
     cdef int x, y, ch
     cdef int ch_bits
     
-    # Pack pixel by pixel, channel by channel
     for y in range(h):
         for x in range(w):
             for ch in range(c):
@@ -145,7 +123,6 @@ def unpack_bits(
     int width,
     int channels
 ):
-    """Legacy function: unpack all channels with same bit depth"""
     cdef Py_ssize_t total_vals = height * width * channels
 
     cdef np.ndarray[u8, ndim=1] flat = np.zeros(total_vals, dtype=np.uint8)
@@ -180,18 +157,6 @@ def unpack_bits_variable(
     int width,
     int channels
 ):
-    """Unpack image with variable bit depths per channel
-    
-    Args:
-        packed: Packed byte array
-        channel_bits: List of bit depths for each channel (e.g., [5, 8, 6] for R, G, B)
-        height: Image height
-        width: Image width
-        channels: Number of channels
-    
-    Returns:
-        Unpacked image array (H, W, C)
-    """
     if len(channel_bits) != channels:
         raise ValueError(f"channel_bits length ({len(channel_bits)}) must match channels ({channels})")
     
@@ -204,7 +169,6 @@ def unpack_bits_variable(
     cdef int x, y, ch
     cdef int ch_bits
     
-    # Unpack pixel by pixel, channel by channel
     for y in range(height):
         for x in range(width):
             for ch in range(channels):
@@ -223,6 +187,3 @@ def unpack_bits_variable(
                 bit_pos += ch_bits
     
     return img
-
-# TODO - create function to encrypt packet with secret
-# TODO - create function to decrypt packet with secret
