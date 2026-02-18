@@ -224,5 +224,5 @@ def unpack_bits_variable(
     
     return img
 
-# TODO - crete function to encrypt packet with secret
+# TODO - create function to encrypt packet with secret
 # TODO - create function to decrypt packet with secret
