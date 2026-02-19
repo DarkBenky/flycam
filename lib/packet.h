@@ -1,6 +1,5 @@
 #pragma once
 
-#include <stddef.h>
 #include <stdint.h>
 
 /*
@@ -23,35 +22,33 @@
  *  Metadata entry: char[8] name + float32 value
  */
 
-#define PACKET_MAX_CHANNELS 3
-#define PACKET_MAX_METADATA 256
-#define PACKET_META_NAME_LEN 8
-#define PACKET_HEADER_SIZE 21
+#define FLYCAM_MAX_CHANNELS 3
+#define FLYCAM_MAX_METADATA 256
+#define FLYCAM_META_NAME_LEN 8
 
 typedef struct {
-  char name[PACKET_META_NAME_LEN + 1];
+  char name[FLYCAM_META_NAME_LEN + 1];
   float value;
-} packet_meta_entry_t;
+} flycam_meta_entry_t;
 
+/* Decoded frame returned by readSocket.
+ * pixels is a width*height ARGB buffer owned by this struct.
+ * Free with freeFrame(). */
 typedef struct {
   uint32_t timestamp;
   uint32_t width;
   uint32_t height;
   uint8_t channels;
-  uint8_t channel_bits[PACKET_MAX_CHANNELS];
+  uint8_t channel_bits[FLYCAM_MAX_CHANNELS];
   uint8_t compression;
   uint32_t image_size;
-  const uint8_t *image_data;
-  packet_meta_entry_t metadata[PACKET_MAX_METADATA];
-} packet_t;
+  flycam_meta_entry_t metadata[FLYCAM_MAX_METADATA];
+  uint32_t *pixels;
+} frame_t;
 
-int packet_parse(const uint8_t *buf, size_t buf_len, packet_t *out);
-int packet_unpack_rgb(const packet_t *pkt, uint8_t *out_rgb);
-int packet_unpack_argb(const packet_t *pkt, uint32_t *out_argb);
-void packet_print_header(const packet_t *pkt);
+typedef struct flycam_socket flycam_socket_t;
 
-typedef struct packet_receiver packet_receiver_t;
-
-packet_receiver_t *packet_receiver_create(const char *addr, int timeout_ms);
-int packet_recv(packet_receiver_t *rx, packet_t *pkt);
-void packet_receiver_destroy(packet_receiver_t *rx);
+flycam_socket_t *initSocket(const char *address, int timeout_ms);
+frame_t        *readSocket(flycam_socket_t *sock);
+void            freeFrame(frame_t *frame);
+void            freeSocket(flycam_socket_t *sock);

@@ -16,43 +16,49 @@ static double now_sec(void) {
 }
 
 int main(void) {
-  packet_receiver_t *rx = packet_receiver_create(SERVER_ADDR, POLL_TIMEOUT);
-  if (!rx)
+  flycam_socket_t *sock = initSocket(SERVER_ADDR, POLL_TIMEOUT);
+  if (!sock)
     return 1;
 
   struct mfb_window *window = NULL;
-  uint32_t *fb = NULL;
-  uint32_t fb_w = 0;
-  uint32_t fb_h = 0;
-  packet_t pkt;
+  uint32_t win_w = 0;
+  uint32_t win_h = 0;
 
   long log_bytes = 0;
   int log_frames = 0;
   double log_time = now_sec();
 
   while (1) {
-    int rc = packet_recv(rx, &pkt);
+    frame_t *frame = readSocket(sock);
 
-    if (rc == 0) {
-      if (!window || pkt.width != fb_w || pkt.height != fb_h) {
+    if (frame) {
+      if (!window || frame->width != win_w || frame->height != win_h) {
         if (window)
           mfb_close(window);
-        free(fb);
-        fb_w = pkt.width;
-        fb_h = pkt.height;
-        fb = malloc(fb_w * fb_h * sizeof(uint32_t));
-        window = mfb_open_ex("flycam", fb_w, fb_h, WF_RESIZABLE);
-        if (!window || !fb) {
-          fprintf(stderr, "Failed to create window (%ux%u)\n", fb_w, fb_h);
+        win_w = frame->width;
+        win_h = frame->height;
+        window = mfb_open_ex("flycam", win_w, win_h, WF_RESIZABLE);
+        if (!window) {
+          fprintf(stderr, "Failed to create window (%ux%u)\n", win_w, win_h);
+          freeFrame(frame);
           break;
         }
-        packet_print_header(&pkt);
+        printf("timestamp    : %u\n", frame->timestamp);
+        printf("resolution   : %ux%u  channels: %u\n", frame->width, frame->height, frame->channels);
+        printf("channel bits : R=%u G=%u B=%u\n", frame->channel_bits[0], frame->channel_bits[1], frame->channel_bits[2]);
+        printf("compression  : %s\n", frame->compression ? "lz4" : "none");
+        printf("image size   : %u bytes\n", frame->image_size);
+        for (int i = 0; i < FLYCAM_MAX_METADATA; i++) {
+          if (frame->metadata[i].name[0] != '\0')
+            printf("meta %-8s : %g\n", frame->metadata[i].name, frame->metadata[i].value);
+        }
       }
 
-      packet_unpack_argb(&pkt, fb);
-
-      log_bytes += pkt.image_size;
+      log_bytes += frame->image_size;
       log_frames += 1;
+
+      mfb_update_ex(window, frame->pixels, win_w, win_h);
+      freeFrame(frame);
 
       double t = now_sec();
       double elapsed = t - log_time;
@@ -64,18 +70,17 @@ int main(void) {
         log_frames = 0;
         log_time = t;
       }
-    }
-
-    if (window) {
-      mfb_update_state state = mfb_update_ex(window, fb, fb_w, fb_h);
-      if (state == STATE_EXIT || state == STATE_INVALID_WINDOW)
-        break;
+    } else {
+      if (window) {
+        mfb_update_state state = mfb_update_ex(window, NULL, win_w, win_h);
+        if (state == STATE_EXIT || state == STATE_INVALID_WINDOW)
+          break;
+      }
     }
   }
 
   if (window)
     mfb_close(window);
-  free(fb);
-  packet_receiver_destroy(rx);
+  freeSocket(sock);
   return 0;
 }
