@@ -33,7 +33,7 @@ H = 480
 W = 720
 C = 3
 
-USE_COMPRESSION = True
+USE_COMPRESSION = False
 
 print(f"Frame size: {H * W * (CHANNEL_BITS[0] + CHANNEL_BITS[1] + CHANNEL_BITS[2]) / 8 / 1024:.2f} KB")
 
@@ -94,6 +94,16 @@ if __name__ == "__main__":
     log_frames = 0
     log_time = time.time()
 
+    META_INTERVAL = 5.0   # seconds between camera metadata refreshes
+    cached_metadata = {
+        "exposure_time": 0,
+        "gain": 0,
+        "iso": 0,
+        "white_balance": 0,
+        "focus_distance": 0,
+    }
+    meta_time = 0.0   # force refresh on first frame
+
     while True:
         if DEBUG:
             ret, frame = cap.read()
@@ -109,13 +119,19 @@ if __name__ == "__main__":
         q = quant.quantize_bitdepth_variable(frame, CHANNEL_BITS)
         packed = quant.pack_bits_variable(q, CHANNEL_BITS)
 
-        metadata = {
-            "exposure_time": picam2.capture_metadata().get("ExposureTime", 0) if not DEBUG else 0,
-            "gain": picam2.capture_metadata().get("AnalogueGain", 0) if not DEBUG else 0,
-            "iso": picam2.capture_metadata().get("ISOSpeedRatings", 0) if not DEBUG else 0,
-            "white_balance": picam2.capture_metadata().get("WhiteBalance", 0) if not DEBUG else 0,
-            "focus_distance": picam2.capture_metadata().get("FocusDistance", 0) if not DEBUG else 0,
-        }
+        now = time.time()
+        if not DEBUG and (now - meta_time >= META_INTERVAL):
+            cam_meta = picam2.capture_metadata()
+            cached_metadata = {
+                "exposure_time": cam_meta.get("ExposureTime", 0),
+                "gain":          cam_meta.get("AnalogueGain", 0),
+                "iso":           cam_meta.get("ISOSpeedRatings", 0),
+                "white_balance": cam_meta.get("WhiteBalance", 0),
+                "focus_distance": cam_meta.get("FocusDistance", 0),
+            }
+            meta_time = now
+
+        metadata = cached_metadata
 
         serialized = Packet(packed, metadata).serialize()
         socket.send(serialized)
