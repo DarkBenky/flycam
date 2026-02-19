@@ -107,8 +107,9 @@ static int unpack_argb(const raw_packet_t *pkt, uint32_t *out_argb) {
         bit_pos += ch_bits;
       }
 
+      /* MiniFB expects 0xBBGGRR (little-endian BGRA), so R→low, B→high */
       out_argb[y * w + x] =
-          ((uint32_t)rgb[0] << 16) | ((uint32_t)rgb[1] << 8) | (uint32_t)rgb[2];
+          ((uint32_t)rgb[2] << 16) | ((uint32_t)rgb[1] << 8) | (uint32_t)rgb[0];
     }
   }
 

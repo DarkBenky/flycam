@@ -145,5 +145,3 @@ if __name__ == "__main__":
             log_bytes = 0
             log_frames = 0
             log_time = now
-
-        time.sleep(0.032)  # Limit to ~30 FPS
