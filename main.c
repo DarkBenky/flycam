@@ -4,7 +4,7 @@
 
 #include <MiniFB.h>
 
-#include "packet.h"
+#include "lib/packet.h"
 
 #define SERVER_ADDR "tcp://localhost:5556"
 #define POLL_TIMEOUT 16
