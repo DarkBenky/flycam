@@ -6,7 +6,7 @@
 
 #include "lib/packet.h"
 
-#define SERVER_ADDR_DEFAULT "tcp://localhost:5556"
+#define SERVER_ADDR_DEFAULT "tcp://91.98.145.193:5556"
 #define POLL_TIMEOUT 16
 
 static double now_sec(void) {

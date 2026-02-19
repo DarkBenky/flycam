@@ -18,4 +18,4 @@ clean:
 	rm -f $(TARGET)
 
 run: $(TARGET)
-	./$(TARGET)
+	export $$(grep -v '^#' .env | xargs) && ./$(TARGET)
