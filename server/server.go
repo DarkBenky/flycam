@@ -41,6 +41,13 @@ func main() {
 		log.Fatalf("Failed to create PUB socket: %v", err)
 	}
 	defer pub.Close()
+	// Only keep the latest frame queued for each subscriber.
+	if err := pub.SetConflate(true); err != nil {
+		log.Fatalf("Failed to set CONFLATE on PUB socket: %v", err)
+	}
+	if err := pub.SetSndhwm(1); err != nil {
+		log.Fatalf("Failed to set SNDHWM on PUB socket: %v", err)
+	}
 	if err := pub.Bind(pubAddr); err != nil {
 		log.Fatalf("Failed to bind PUB socket: %v", err)
 	}

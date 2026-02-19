@@ -135,6 +135,11 @@ flycam_socket_t *initSocket(const char *address, int timeout_ms) {
   sock->zmq_ctx = zmq_ctx_new();
   sock->zmq_sub = zmq_socket(sock->zmq_ctx, ZMQ_SUB);
 
+  /* Drop all but the latest frame on the receive side. */
+  int conflate = 1, hwm = 1;
+  zmq_setsockopt(sock->zmq_sub, ZMQ_CONFLATE, &conflate, sizeof(conflate));
+  zmq_setsockopt(sock->zmq_sub, ZMQ_RCVHWM, &hwm, sizeof(hwm));
+
   if (zmq_connect(sock->zmq_sub, address) != 0) {
     fprintf(stderr, "initSocket: failed to connect to %s\n", address);
     freeSocket(sock);
