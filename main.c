@@ -6,7 +6,7 @@
 
 #include "lib/packet.h"
 
-#define SERVER_ADDR "tcp://localhost:5556"
+#define SERVER_ADDR_DEFAULT "tcp://localhost:5556"
 #define POLL_TIMEOUT 16
 
 static double now_sec(void) {
@@ -16,7 +16,10 @@ static double now_sec(void) {
 }
 
 int main(void) {
-  flycam_socket_t *sock = initSocket(SERVER_ADDR, POLL_TIMEOUT);
+  const char *server_addr = getenv("FLYCAM_SERVER");
+  if (!server_addr)
+    server_addr = SERVER_ADDR_DEFAULT;
+  flycam_socket_t *sock = initSocket(server_addr, POLL_TIMEOUT);
   if (!sock)
     return 1;
 
