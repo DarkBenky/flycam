@@ -25,6 +25,13 @@ func main() {
 		log.Fatalf("Failed to create PULL socket: %v", err)
 	}
 	defer pull.Close()
+	// Keep only the latest frame in the receive buffer; drop older ones.
+	if err := pull.SetConflate(true); err != nil {
+		log.Fatalf("Failed to set CONFLATE on PULL socket: %v", err)
+	}
+	if err := pull.SetRcvhwm(1); err != nil {
+		log.Fatalf("Failed to set RCVHWM on PULL socket: %v", err)
+	}
 	if err := pull.Bind(pullAddr); err != nil {
 		log.Fatalf("Failed to bind PULL socket: %v", err)
 	}
