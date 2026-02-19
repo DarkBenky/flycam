@@ -79,7 +79,8 @@ if __name__ == "__main__":
     if not DEBUG:
         picam2 = Picamera2()
         config = picam2.create_preview_configuration(
-            main={"size": (W, H), "format": "RGB888"}
+            main={"size": (W, H), "format": "RGB888"},
+            controls={"FrameDurationLimits": (16666, 16666)}  # 60fps
         )
         picam2.configure(config)
         picam2.start()
