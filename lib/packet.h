@@ -42,6 +42,7 @@ typedef struct {
   uint8_t channel_bits[FLYCAM_MAX_CHANNELS];
   uint8_t compression;
   uint32_t image_size;
+  uint32_t wire_size; /* raw ZMQ message bytes (compressed) */
   flycam_meta_entry_t metadata[FLYCAM_MAX_METADATA];
   uint32_t *pixels;
 } frame_t;
@@ -49,6 +50,6 @@ typedef struct {
 typedef struct flycam_socket flycam_socket_t;
 
 flycam_socket_t *initSocket(const char *address, int timeout_ms);
-frame_t        *readSocket(flycam_socket_t *sock);
-void            freeFrame(frame_t *frame);
-void            freeSocket(flycam_socket_t *sock);
+frame_t *readSocket(flycam_socket_t *sock);
+void freeFrame(frame_t *frame);
+void freeSocket(flycam_socket_t *sock);

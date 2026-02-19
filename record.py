@@ -10,7 +10,7 @@ import lz4.block
 if not DEBUG:
     from picamera2 import Picamera2
 
-from env import SECRET, GO_SERVER
+from env import GO_SERVER
 import zmq
 
 try:
@@ -27,7 +27,7 @@ except ImportError:
 
 
 
-CHANNEL_BITS = [2, 4, 3]
+CHANNEL_BITS = [3, 5, 4]
 
 H = 480
 W = 720

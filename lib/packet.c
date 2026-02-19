@@ -1,10 +1,10 @@
 #include "packet.h"
 
 #include <limits.h>
+#include <lz4.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <lz4.h>
 #include <zmq.h>
 
 #define PACKET_HEADER_SIZE 21
@@ -36,9 +36,9 @@ static int parse_packet(const uint8_t *buf, size_t buf_len, raw_packet_t *out) {
   }
 
   out->timestamp = read_u32(buf + 0);
-  out->width     = read_u32(buf + 4);
-  out->height    = read_u32(buf + 8);
-  out->channels  = buf[12];
+  out->width = read_u32(buf + 4);
+  out->height = read_u32(buf + 8);
+  out->channels = buf[12];
 
   if (out->channels > FLYCAM_MAX_CHANNELS) {
     fprintf(stderr, "parse_packet: too many channels (%u)\n", out->channels);
@@ -48,8 +48,8 @@ static int parse_packet(const uint8_t *buf, size_t buf_len, raw_packet_t *out) {
   out->channel_bits[0] = buf[13];
   out->channel_bits[1] = buf[14];
   out->channel_bits[2] = buf[15];
-  out->compression     = buf[16];
-  out->image_size      = read_u32(buf + 17);
+  out->compression = buf[16];
+  out->image_size = read_u32(buf + 17);
 
   size_t expected = PACKET_HEADER_SIZE + out->image_size + meta_size;
   if (buf_len < expected) {
@@ -65,7 +65,8 @@ static int parse_packet(const uint8_t *buf, size_t buf_len, raw_packet_t *out) {
     const uint8_t *entry = meta_ptr + i * 12;
     memcpy(out->metadata[i].name, entry, FLYCAM_META_NAME_LEN);
     out->metadata[i].name[FLYCAM_META_NAME_LEN] = '\0';
-    memcpy(&out->metadata[i].value, entry + FLYCAM_META_NAME_LEN, sizeof(float));
+    memcpy(&out->metadata[i].value, entry + FLYCAM_META_NAME_LEN,
+           sizeof(float));
   }
 
   return 0;
@@ -76,8 +77,8 @@ static int unpack_argb(const raw_packet_t *pkt, uint32_t *out_argb) {
     return -1;
 
   const uint8_t *src = pkt->image_data;
-  uint32_t w   = pkt->width;
-  uint32_t h   = pkt->height;
+  uint32_t w = pkt->width;
+  uint32_t h = pkt->height;
   uint8_t ch_n = pkt->channels;
   size_t bit_pos = 0;
   size_t image_bytes = pkt->image_size;
@@ -87,14 +88,14 @@ static int unpack_argb(const raw_packet_t *pkt, uint32_t *out_argb) {
     for (uint32_t x = 0; x < w; x++) {
       for (uint8_t ch = 0; ch < ch_n && ch < 3; ch++) {
         uint8_t ch_bits = pkt->channel_bits[ch];
-        uint8_t mask    = (uint8_t)((1u << ch_bits) - 1u);
+        uint8_t mask = (uint8_t)((1u << ch_bits) - 1u);
         size_t byte_idx = bit_pos / 8;
-        uint8_t offset  = (uint8_t)(bit_pos % 8);
+        uint8_t offset = (uint8_t)(bit_pos % 8);
 
         if (byte_idx >= image_bytes)
           return -1;
 
-        uint8_t value   = (src[byte_idx] >> offset) & mask;
+        uint8_t value = (src[byte_idx] >> offset) & mask;
 
         if ((offset + ch_bits) > 8) {
           if (byte_idx + 1 >= image_bytes)
@@ -117,11 +118,11 @@ static int unpack_argb(const raw_packet_t *pkt, uint32_t *out_argb) {
 struct flycam_socket {
   void *zmq_ctx;
   void *zmq_sub;
-  int   timeout_ms;
+  int timeout_ms;
   zmq_msg_t msg;
-  int   msg_open;
+  int msg_open;
   uint8_t *decomp_buf;
-  size_t   decomp_buf_size;
+  size_t decomp_buf_size;
 };
 
 flycam_socket_t *initSocket(const char *address, int timeout_ms) {
@@ -130,8 +131,8 @@ flycam_socket_t *initSocket(const char *address, int timeout_ms) {
     return NULL;
 
   sock->timeout_ms = timeout_ms;
-  sock->zmq_ctx    = zmq_ctx_new();
-  sock->zmq_sub    = zmq_socket(sock->zmq_ctx, ZMQ_SUB);
+  sock->zmq_ctx = zmq_ctx_new();
+  sock->zmq_sub = zmq_socket(sock->zmq_ctx, ZMQ_SUB);
 
   if (zmq_connect(sock->zmq_sub, address) != 0) {
     fprintf(stderr, "initSocket: failed to connect to %s\n", address);
@@ -165,14 +166,16 @@ frame_t *readSocket(flycam_socket_t *sock) {
   }
   sock->msg_open = 1;
 
+  size_t wire_size = zmq_msg_size(&sock->msg);
+
   raw_packet_t pkt;
-  if (parse_packet(zmq_msg_data(&sock->msg), zmq_msg_size(&sock->msg), &pkt) != 0)
+  if (parse_packet(zmq_msg_data(&sock->msg), wire_size, &pkt) != 0)
     return NULL;
 
   if (pkt.compression == 1) {
-    size_t total_bits = (size_t)pkt.width * pkt.height *
-                        (pkt.channel_bits[0] + pkt.channel_bits[1] +
-                         pkt.channel_bits[2]);
+    size_t total_bits =
+        (size_t)pkt.width * pkt.height *
+        (pkt.channel_bits[0] + pkt.channel_bits[1] + pkt.channel_bits[2]);
     size_t decomp_size = (total_bits + 7) / 8;
 
     if (decomp_size > sock->decomp_buf_size) {
@@ -181,7 +184,7 @@ frame_t *readSocket(flycam_socket_t *sock) {
         fprintf(stderr, "readSocket: out of memory for decompression\n");
         return NULL;
       }
-      sock->decomp_buf      = buf;
+      sock->decomp_buf = buf;
       sock->decomp_buf_size = decomp_size;
     }
 
@@ -190,11 +193,9 @@ frame_t *readSocket(flycam_socket_t *sock) {
       return NULL;
     }
 
-    int result = LZ4_decompress_safe(
-        (const char *)pkt.image_data,
-        (char *)sock->decomp_buf,
-        (int)pkt.image_size,
-        (int)decomp_size);
+    int result = LZ4_decompress_safe((const char *)pkt.image_data,
+                                     (char *)sock->decomp_buf,
+                                     (int)pkt.image_size, (int)decomp_size);
 
     if (result < 0) {
       fprintf(stderr, "readSocket: LZ4 decompression failed (%d)\n", result);
@@ -209,15 +210,16 @@ frame_t *readSocket(flycam_socket_t *sock) {
   if (!frame)
     return NULL;
 
-  frame->timestamp   = pkt.timestamp;
-  frame->width       = pkt.width;
-  frame->height      = pkt.height;
-  frame->channels    = pkt.channels;
+  frame->timestamp = pkt.timestamp;
+  frame->width = pkt.width;
+  frame->height = pkt.height;
+  frame->channels = pkt.channels;
   frame->channel_bits[0] = pkt.channel_bits[0];
   frame->channel_bits[1] = pkt.channel_bits[1];
   frame->channel_bits[2] = pkt.channel_bits[2];
   frame->compression = pkt.compression;
-  frame->image_size  = pkt.image_size;
+  frame->image_size = pkt.image_size;
+  frame->wire_size = (uint32_t)wire_size;
   memcpy(frame->metadata, pkt.metadata, sizeof(frame->metadata));
 
   size_t pixel_count = (size_t)pkt.width * pkt.height;

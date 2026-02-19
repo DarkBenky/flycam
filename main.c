@@ -44,17 +44,20 @@ int main(void) {
           break;
         }
         printf("timestamp    : %u\n", frame->timestamp);
-        printf("resolution   : %ux%u  channels: %u\n", frame->width, frame->height, frame->channels);
-        printf("channel bits : R=%u G=%u B=%u\n", frame->channel_bits[0], frame->channel_bits[1], frame->channel_bits[2]);
+        printf("resolution   : %ux%u  channels: %u\n", frame->width,
+               frame->height, frame->channels);
+        printf("channel bits : R=%u G=%u B=%u\n", frame->channel_bits[0],
+               frame->channel_bits[1], frame->channel_bits[2]);
         printf("compression  : %s\n", frame->compression ? "lz4" : "none");
         printf("image size   : %u bytes\n", frame->image_size);
         for (int i = 0; i < FLYCAM_MAX_METADATA; i++) {
           if (frame->metadata[i].name[0] != '\0')
-            printf("meta %-8s : %g\n", frame->metadata[i].name, frame->metadata[i].value);
+            printf("meta %-8s : %g\n", frame->metadata[i].name,
+                   frame->metadata[i].value);
         }
       }
 
-      log_bytes += frame->image_size;
+      log_bytes += frame->wire_size;
       log_frames += 1;
 
       mfb_update_ex(window, frame->pixels, win_w, win_h);
