@@ -5,6 +5,7 @@ import time
 import struct
 import numpy as np
 import cv2
+import lz4.block
 
 if not DEBUG:
     from picamera2 import Picamera2
@@ -32,6 +33,8 @@ H = 480
 W = 720
 C = 3
 
+USE_COMPRESSION = True
+
 print(f"Frame size: {H * W * (CHANNEL_BITS[0] + CHANNEL_BITS[1] + CHANNEL_BITS[2]) / 8 / 1024:.2f} KB")
 
 
@@ -47,7 +50,15 @@ class Packet:
         height = struct.pack('I', H)
         channels = struct.pack('B', C)
         channel_bytes = struct.pack('B', CHANNEL_BITS[0]) + struct.pack('B', CHANNEL_BITS[1]) + struct.pack('B', CHANNEL_BITS[2])
-        image_bytes = bytes(self.frame)
+
+        raw_image = bytes(self.frame)
+        if USE_COMPRESSION:
+            image_bytes = lz4.block.compress(raw_image, store_size=False)
+            compression_flag = struct.pack('B', 1)
+        else:
+            image_bytes = raw_image
+            compression_flag = struct.pack('B', 0)
+
         image_size = struct.pack('I', len(image_bytes))
 
         metadata_bytes = bytearray(256 * 12)
@@ -57,7 +68,7 @@ class Packet:
             metadata_bytes[offset:offset+8] = name_bytes
             struct.pack_into('f', metadata_bytes, offset+8, float(value))
 
-        return timestamp_bytes + width + height + channels + channel_bytes + image_size + image_bytes + bytes(metadata_bytes)
+        return timestamp_bytes + width + height + channels + channel_bytes + compression_flag + image_size + image_bytes + bytes(metadata_bytes)
 
 if __name__ == "__main__":
     context = zmq.Context()

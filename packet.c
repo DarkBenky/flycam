@@ -3,6 +3,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <lz4.h>
 #include <zmq.h>
 
 static inline uint32_t read_u32(const uint8_t *p) {
@@ -31,7 +32,8 @@ int packet_parse(const uint8_t *buf, size_t buf_len, packet_t *out) {
   out->channel_bits[0] = buf[13];
   out->channel_bits[1] = buf[14];
   out->channel_bits[2] = buf[15];
-  out->image_size = read_u32(buf + 16);
+  out->compression = buf[16];
+  out->image_size = read_u32(buf + 17);
 
   size_t expected = PACKET_HEADER_SIZE + out->image_size + meta_size;
   if (buf_len < expected) {
@@ -126,6 +128,7 @@ void packet_print_header(const packet_t *pkt) {
          pkt->channels);
   printf("channel bits : R=%u G=%u B=%u\n", pkt->channel_bits[0],
          pkt->channel_bits[1], pkt->channel_bits[2]);
+  printf("compression  : %s\n", pkt->compression ? "lz4" : "none");
   printf("image size   : %u bytes\n", pkt->image_size);
   for (int i = 0; i < PACKET_MAX_METADATA; i++) {
     if (pkt->metadata[i].name[0] != '\0')
@@ -139,6 +142,8 @@ struct packet_receiver {
   int timeout_ms;
   zmq_msg_t msg;
   int msg_open;
+  uint8_t *decomp_buf;
+  size_t decomp_buf_size;
 };
 
 packet_receiver_t *packet_receiver_create(const char *addr, int timeout_ms) {
@@ -181,7 +186,46 @@ int packet_recv(packet_receiver_t *rx, packet_t *pkt) {
   }
   rx->msg_open = 1;
 
-  return packet_parse(zmq_msg_data(&rx->msg), zmq_msg_size(&rx->msg), pkt);
+  if (packet_parse(zmq_msg_data(&rx->msg), zmq_msg_size(&rx->msg), pkt) != 0)
+    return -1;
+
+  if (pkt->compression == 1) {
+    size_t total_bits = (size_t)pkt->width * pkt->height *
+                        (pkt->channel_bits[0] + pkt->channel_bits[1] +
+                         pkt->channel_bits[2]);
+    size_t decomp_size = (total_bits + 7) / 8;
+
+    if (decomp_size > rx->decomp_buf_size) {
+      uint8_t *buf = realloc(rx->decomp_buf, decomp_size);
+      if (!buf) {
+        fprintf(stderr, "packet_recv: out of memory for decompression\n");
+        return -1;
+      }
+      rx->decomp_buf = buf;
+      rx->decomp_buf_size = decomp_size;
+    }
+
+    if (decomp_size > (size_t)INT_MAX || pkt->image_size > (uint32_t)INT_MAX) {
+      fprintf(stderr, "packet_recv: image size too large for LZ4\n");
+      return -1;
+    }
+
+    int result = LZ4_decompress_safe(
+        (const char *)pkt->image_data,
+        (char *)rx->decomp_buf,
+        (int)pkt->image_size,
+        (int)decomp_size);
+
+    if (result < 0) {
+      fprintf(stderr, "packet_recv: LZ4 decompression failed (%d)\n", result);
+      return -1;
+    }
+
+    pkt->image_data = rx->decomp_buf;
+    pkt->image_size = (uint32_t)result;
+  }
+
+  return 0;
 }
 
 void packet_receiver_destroy(packet_receiver_t *rx) {
@@ -193,5 +237,6 @@ void packet_receiver_destroy(packet_receiver_t *rx) {
     zmq_close(rx->zmq_sub);
   if (rx->zmq_ctx)
     zmq_ctx_destroy(rx->zmq_ctx);
+  free(rx->decomp_buf);
   free(rx);
 }

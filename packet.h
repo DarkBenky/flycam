@@ -15,9 +15,10 @@
  *  13      | red_bits     | uint8   | 1
  *  14      | green_bits   | uint8   | 1
  *  15      | blue_bits    | uint8   | 1
- *  16      | image_size   | uint32  | 4
- *  20      | image_data   | bytes   | image_size
- *  20+img  | metadata     | entry[] | 256 * 12
+ *  16      | compression  | uint8   | 1   (0=none, 1=lz4)
+ *  17      | image_size   | uint32  | 4
+ *  21      | image_data   | bytes   | image_size
+ *  21+img  | metadata     | entry[] | 256 * 12
  *
  *  Metadata entry: char[8] name + float32 value
  */
@@ -25,7 +26,7 @@
 #define PACKET_MAX_CHANNELS 3
 #define PACKET_MAX_METADATA 256
 #define PACKET_META_NAME_LEN 8
-#define PACKET_HEADER_SIZE 20
+#define PACKET_HEADER_SIZE 21
 
 typedef struct {
   char name[PACKET_META_NAME_LEN + 1];
@@ -38,6 +39,7 @@ typedef struct {
   uint32_t height;
   uint8_t channels;
   uint8_t channel_bits[PACKET_MAX_CHANNELS];
+  uint8_t compression;
   uint32_t image_size;
   const uint8_t *image_data;
   packet_meta_entry_t metadata[PACKET_MAX_METADATA];
