@@ -29,11 +29,11 @@ except ImportError:
 
 CHANNEL_BITS = [3, 5, 4]
 
-H = 480
-W = 720
+H = 400
+W = 600
 C = 3
 
-USE_COMPRESSION = False
+USE_COMPRESSION = True
 
 print(f"Frame size: {H * W * (CHANNEL_BITS[0] + CHANNEL_BITS[1] + CHANNEL_BITS[2]) / 8 / 1024:.2f} KB")
 
