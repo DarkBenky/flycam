@@ -3,3 +3,4 @@ numpy
 opencv-python
 picamera2
 lz4
+zmq

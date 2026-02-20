@@ -1,4 +1,4 @@
-DEBUG = False
+DEBUG = True
 DEBUG_VIDEO = "fpv.mp4"
 
 import time
