@@ -1,4 +1,4 @@
-DEBUG = True
+DEBUG = False
 DEBUG_VIDEO = "fpv.mp4"
 
 import time
@@ -29,8 +29,8 @@ except ImportError:
 
 CHANNEL_BITS = [3, 5, 4]
 
-H = 400
-W = 600
+H = 320
+W = 320
 C = 3
 
 USE_COMPRESSION = True
