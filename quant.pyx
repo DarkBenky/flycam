@@ -150,6 +150,55 @@ def unpack_bits(
 
     return flat.reshape((height, width, channels))
 
+def quantize_and_pack(np.ndarray[u8, ndim=3] img, list channel_bits):
+    """
+    Quantize each channel to its target bit depth and pack into a flat byte
+    array in a single pass — equivalent to calling quantize_bitdepth_variable
+    followed by pack_bits_variable but without the intermediate array.
+    """
+    cdef int h = img.shape[0]
+    cdef int w = img.shape[1]
+    cdef int c = img.shape[2]
+
+    if len(channel_bits) != c:
+        raise ValueError(
+            f"channel_bits length ({len(channel_bits)}) must match image channels ({c})"
+        )
+
+    cdef Py_ssize_t bits_per_pixel = sum(channel_bits)
+    cdef Py_ssize_t total_bits = <Py_ssize_t>h * w * bits_per_pixel
+    cdef Py_ssize_t total_bytes = (total_bits + 7) // 8
+
+    cdef np.ndarray[u8, ndim=1] packed = np.zeros(total_bytes, dtype=np.uint8)
+    cdef u8[:] out = packed
+
+    cdef Py_ssize_t bit_pos = 0
+    cdef Py_ssize_t byte_idx, offset_bits
+    cdef u8 value
+    cdef int x, y, ch, ch_bits, shift
+
+    for y in range(h):
+        for x in range(w):
+            for ch in range(c):
+                ch_bits = channel_bits[ch]
+                shift = 8 - ch_bits
+                # quantize: drop the low bits
+                value = img[y, x, ch] >> shift
+
+                # pack into output bitstream
+                byte_idx = bit_pos // 8
+                offset_bits = bit_pos % 8
+
+                out[byte_idx] |= (value << offset_bits) & 0xFF
+
+                if offset_bits + ch_bits > 8:
+                    out[byte_idx + 1] |= value >> (8 - offset_bits)
+
+                bit_pos += ch_bits
+
+    return packed
+
+
 def unpack_bits_variable(
     np.ndarray[u8, ndim=1] packed,
     list channel_bits,

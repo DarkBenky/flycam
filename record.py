@@ -3,6 +3,8 @@ DEBUG_VIDEO = "fpv.mp4"
 
 import time
 import struct
+import threading
+import queue
 import numpy as np
 import cv2
 import lz4.block
@@ -37,40 +39,57 @@ USE_COMPRESSION = True
 
 print(f"Frame size: {H * W * (CHANNEL_BITS[0] + CHANNEL_BITS[1] + CHANNEL_BITS[2]) / 8 / 1024:.2f} KB")
 
+# ---------------------------------------------------------------------------
+# Fast serialization — fixed header fields written once at startup.
+# Per frame we only update: timestamp (4 B), compression flag (1 B),
+# image_size (4 B), image bytes, and 5 metadata float values.
+# ---------------------------------------------------------------------------
+_HEADER_SIZE = 21          # 4+4+4+1+3+1+4
+_IMAGE_MAX   = (H * W * sum(CHANNEL_BITS) + 7) // 8
+_META_KEYS   = ["exposure_time", "gain", "iso", "white_balance", "focus_distance"]
+_META_SIZE   = 256 * 12    # keep protocol-compatible with C decoder
 
-class Packet:
-    def __init__(self, frame, metadata: dict):
-        self.timestamp = time.time()
-        self.frame = frame
-        self.metadata = metadata
+_out_buf = bytearray(_HEADER_SIZE + _IMAGE_MAX + 64 + _META_SIZE)
 
-    def serialize(self):
-        timestamp_bytes = struct.pack('I', int(self.timestamp) & 0xFFFFFFFF)
-        width = struct.pack('I', W)
-        height = struct.pack('I', H)
-        channels = struct.pack('B', C)
-        channel_bytes = struct.pack('B', CHANNEL_BITS[0]) + struct.pack('B', CHANNEL_BITS[1]) + struct.pack('B', CHANNEL_BITS[2])
+# Write constant header fields once
+struct.pack_into('I', _out_buf,  4, W)
+struct.pack_into('I', _out_buf,  8, H)
+struct.pack_into('B', _out_buf, 12, C)
+_out_buf[13] = CHANNEL_BITS[0]
+_out_buf[14] = CHANNEL_BITS[1]
+_out_buf[15] = CHANNEL_BITS[2]
 
-        raw_image = bytes(self.frame)
-        if USE_COMPRESSION:
-            image_bytes = lz4.block.compress(raw_image, store_size=False)
-            compression_flag = struct.pack('B', 1)
-        else:
-            image_bytes = raw_image
-            compression_flag = struct.pack('B', 0)
+# Pre-populate metadata name fields (only float values change per frame)
+_meta_buf = bytearray(_META_SIZE)
+for _i, _key in enumerate(_META_KEYS):
+    _off = _i * 12
+    _meta_buf[_off:_off + 8] = _key.encode('ascii')[:8].ljust(8, b'\x00')
 
-        image_size = struct.pack('I', len(image_bytes))
 
-        metadata_bytes = bytearray(256 * 12)
-        for i, (name, value) in enumerate(list(self.metadata.items())[:256]):
-            offset = i * 12
-            name_bytes = name.encode('ascii')[:8].ljust(8, b'\x00')
-            metadata_bytes[offset:offset+8] = name_bytes
-            struct.pack_into('f', metadata_bytes, offset+8, float(value))
+def _serialize(packed_frame, metadata: dict) -> bytes:
+    """Serialize into the shared buffer and return an immutable bytes copy."""
+    ts = int(time.time()) & 0xFFFFFFFF
 
-        return timestamp_bytes + width + height + channels + channel_bytes + compression_flag + image_size + image_bytes + bytes(metadata_bytes)
+    raw = bytes(packed_frame)
+    if USE_COMPRESSION:
+        img_data = lz4.block.compress(raw, store_size=False)
+        _out_buf[16] = 1
+    else:
+        img_data = raw
+        _out_buf[16] = 0
 
-TARGET_FPS = 24
+    img_len = len(img_data)
+    struct.pack_into('I', _out_buf, 0,  ts)
+    struct.pack_into('I', _out_buf, 17, img_len)
+    _out_buf[_HEADER_SIZE : _HEADER_SIZE + img_len] = img_data
+
+    meta_start = _HEADER_SIZE + img_len
+    _out_buf[meta_start : meta_start + _META_SIZE] = _meta_buf
+    for i, key in enumerate(_META_KEYS):
+        struct.pack_into('f', _out_buf, meta_start + i * 12 + 8,
+                         float(metadata.get(key, 0.0)))
+
+    return bytes(_out_buf[:meta_start + _META_SIZE])
 
 if __name__ == "__main__":
     context = zmq.Context()
@@ -95,60 +114,91 @@ if __name__ == "__main__":
             raise RuntimeError(f"Cannot open debug video: {DEBUG_VIDEO}")
         print(f"Debug mode: reading from '{DEBUG_VIDEO}'")
 
-    log_interval = 60
-    log_bytes = 0
-    log_frames = 0
-    log_time = time.time()
+    # ------------------------------------------------------------------
+    # Capture thread — runs sensor capture independently so the main
+    # thread never stalls waiting for the camera.  Queue depth = 1:
+    # always process the latest frame, silently drop any that pile up.
+    # ------------------------------------------------------------------
+    _frame_q: queue.Queue = queue.Queue(maxsize=1)
+    _stop_evt = threading.Event()
 
-    META_INTERVAL = 5.0   # seconds between camera metadata refreshes
-    cached_metadata = {
-        "exposure_time": 0,
-        "gain": 0,
-        "iso": 0,
-        "white_balance": 0,
-        "focus_distance": 0,
-    }
-    meta_time = 0.0   # force refresh on first frame
-
-    while True:
-        if DEBUG:
-            ret, frame = cap.read()
-            if not ret:
-                cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
-                ret, frame = cap.read()
-            frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
-            frame = cv2.resize(frame, (W, H))
-            frame = np.asarray(frame, dtype=np.uint8)
+    def _capture_loop():
+        if not DEBUG:
+            while not _stop_evt.is_set():
+                frame = picam2.capture_array()
+                if _frame_q.full():
+                    try:
+                        _frame_q.get_nowait()
+                    except queue.Empty:
+                        pass
+                _frame_q.put(frame)
         else:
-            frame = picam2.capture_array()
+            while not _stop_evt.is_set():
+                ret, raw = cap.read()
+                if not ret:
+                    cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
+                    ret, raw = cap.read()
+                raw = cv2.cvtColor(raw, cv2.COLOR_BGR2RGB)
+                raw = cv2.resize(raw, (W, H))
+                raw = np.asarray(raw, dtype=np.uint8)
+                if _frame_q.full():
+                    try:
+                        _frame_q.get_nowait()
+                    except queue.Empty:
+                        pass
+                _frame_q.put(raw)
 
-        q = quant.quantize_bitdepth_variable(frame, CHANNEL_BITS)
-        packed = quant.pack_bits_variable(q, CHANNEL_BITS)
+    cap_thread = threading.Thread(target=_capture_loop, daemon=True)
+    cap_thread.start()
 
-        now = time.time()
-        if not DEBUG and (now - meta_time >= META_INTERVAL):
-            cam_meta = picam2.capture_metadata()
-            cached_metadata = {
-                "exposure_time": cam_meta.get("ExposureTime", 0),
-                "gain":          cam_meta.get("AnalogueGain", 0),
-                "iso":           cam_meta.get("ISOSpeedRatings", 0),
-                "white_balance": cam_meta.get("WhiteBalance", 0),
-                "focus_distance": cam_meta.get("FocusDistance", 0),
-            }
-            meta_time = now
+    log_bytes  = 0
+    log_frames = 0
+    log_time   = time.time()
 
-        metadata = cached_metadata
+    META_INTERVAL   = 5.0
+    cached_metadata = {k: 0.0 for k in _META_KEYS}
+    meta_time = 0.0
 
-        serialized = Packet(packed, metadata).serialize()
-        socket.send(serialized)
-        log_bytes += len(serialized)
-        log_frames += 1
+    try:
+        while True:
+            frame = _frame_q.get()  # block only until the next captured frame
 
-        now = time.time()
-        if now - log_time >= 1.0:
-            elapsed = now - log_time
-            print(f"[py]  {log_bytes / elapsed / 1024:.1f} KB/s  {log_frames / elapsed:.1f} fps")
-            log_bytes = 0
-            log_frames = 0
-            log_time = now
-        time.sleep(max(0, 1.0 / TARGET_FPS - (time.time() - now)))
+            # Single-pass quantize + pack (was two separate Cython calls)
+            packed = quant.quantize_and_pack(frame, CHANNEL_BITS)
+
+            now = time.time()
+            if not DEBUG and (now - meta_time >= META_INTERVAL):
+                cam_meta = picam2.capture_metadata()
+                cached_metadata = {
+                    "exposure_time":  cam_meta.get("ExposureTime",    0),
+                    "gain":           cam_meta.get("AnalogueGain",    0),
+                    "iso":            cam_meta.get("ISOSpeedRatings", 0),
+                    "white_balance":  cam_meta.get("WhiteBalance",    0),
+                    "focus_distance": cam_meta.get("FocusDistance",   0),
+                }
+                meta_time = now
+
+            serialized = _serialize(packed, cached_metadata)
+            # copy=False: ZMQ won't make an extra internal copy of the
+            # already-immutable bytes object
+            socket.send(serialized, copy=False)
+
+            log_bytes  += len(serialized)
+            log_frames += 1
+
+            now = time.time()
+            if now - log_time >= 1.0:
+                elapsed = now - log_time
+                print(f"[py]  {log_bytes / elapsed / 1024:.1f} KB/s"
+                      f"  {log_frames / elapsed:.1f} fps")
+                log_bytes  = 0
+                log_frames = 0
+                log_time   = now
+
+    except KeyboardInterrupt:
+        pass
+    finally:
+        _stop_evt.set()
+        cap_thread.join(timeout=2)
+        if not DEBUG:
+            picam2.stop()
