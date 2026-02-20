@@ -70,9 +70,14 @@ class Packet:
 
         return timestamp_bytes + width + height + channels + channel_bytes + compression_flag + image_size + image_bytes + bytes(metadata_bytes)
 
+TARGET_FPS = 24
+
 if __name__ == "__main__":
     context = zmq.Context()
     socket = context.socket(zmq.PUSH)
+    # Drop all but the latest frame: never queue stale frames.
+    socket.setsockopt(zmq.CONFLATE, 1)
+    socket.setsockopt(zmq.SNDHWM, 1)
     socket.connect(GO_SERVER)
     socket.setsockopt(zmq.SNDBUF, H * W * (CHANNEL_BITS[0] + CHANNEL_BITS[1] + CHANNEL_BITS[2]) // 8 * 2)
 
@@ -146,3 +151,4 @@ if __name__ == "__main__":
             log_bytes = 0
             log_frames = 0
             log_time = now
+        time.sleep(max(0, 1.0 / TARGET_FPS - (time.time() - now)))
