@@ -3,21 +3,63 @@ package main
 import (
 	"fmt"
 	"log"
-	"sync"
 	"time"
 
 	zmq "github.com/pebbe/zmq4"
 )
 
 const (
-	pullAddr = "tcp://*:5555"
-	pubAddr  = "tcp://*:5556"
+	pullAddr     = "tcp://*:5555"
+	pubAddr      = "tcp://*:5556"
+	metaPullAddr = "tcp://*:5557"
+	metaPubAddr  = "tcp://*:5558"
 )
 
-var (
-	latestFrame []byte
-	mu          sync.RWMutex
-)
+// runMetaForwarder forwards metadata packets from the Pi to all subscribers.
+// It runs in its own goroutine with dedicated sockets (ZMQ sockets must not
+// be shared across goroutines).
+func runMetaForwarder() {
+	pull, err := zmq.NewSocket(zmq.PULL)
+	if err != nil {
+		log.Fatalf("Failed to create meta PULL socket: %v", err)
+	}
+	defer pull.Close()
+	if err := pull.SetConflate(true); err != nil {
+		log.Fatalf("Failed to set CONFLATE on meta PULL: %v", err)
+	}
+	if err := pull.SetRcvhwm(1); err != nil {
+		log.Fatalf("Failed to set RCVHWM on meta PULL: %v", err)
+	}
+	if err := pull.Bind(metaPullAddr); err != nil {
+		log.Fatalf("Failed to bind meta PULL: %v", err)
+	}
+
+	pub, err := zmq.NewSocket(zmq.PUB)
+	if err != nil {
+		log.Fatalf("Failed to create meta PUB socket: %v", err)
+	}
+	defer pub.Close()
+	if err := pub.SetConflate(true); err != nil {
+		log.Fatalf("Failed to set CONFLATE on meta PUB: %v", err)
+	}
+	if err := pub.SetSndhwm(1); err != nil {
+		log.Fatalf("Failed to set SNDHWM on meta PUB: %v", err)
+	}
+	if err := pub.Bind(metaPubAddr); err != nil {
+		log.Fatalf("Failed to bind meta PUB: %v", err)
+	}
+
+	for {
+		data, err := pull.RecvBytes(0)
+		if err != nil {
+			log.Printf("Meta recv error: %v", err)
+			continue
+		}
+		if _, err := pub.SendBytes(data, 0); err != nil {
+			log.Printf("Meta pub error: %v", err)
+		}
+	}
+}
 
 func main() {
 	pull, err := zmq.NewSocket(zmq.PULL)
@@ -53,8 +95,10 @@ func main() {
 	}
 
 	fmt.Printf("flycam server running\n")
-	fmt.Printf("  PULL %s\n", pullAddr)
-	fmt.Printf("  PUB  %s\n", pubAddr)
+	fmt.Printf("  video PULL %s  PUB %s\n", pullAddr, pubAddr)
+	fmt.Printf("  meta  PULL %s  PUB %s\n", metaPullAddr, metaPubAddr)
+
+	go runMetaForwarder()
 
 	var totalBytes int64
 	var frameCount int64
@@ -66,10 +110,6 @@ func main() {
 			log.Printf("Recv error: %v", err)
 			continue
 		}
-
-		mu.Lock()
-		latestFrame = data
-		mu.Unlock()
 
 		if _, err := pub.SendBytes(data, 0); err != nil {
 			log.Printf("Pub send error: %v", err)

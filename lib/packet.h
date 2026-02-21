@@ -3,53 +3,59 @@
 #include <stdint.h>
 
 /*
- * Binary packet layout:
+ * Video packet layout (JPEG encoding):
  *
- *  Offset  | Field        | Type    | Size
- *  --------|--------------|---------|-----
- *  0       | timestamp    | uint32  | 4
- *  4       | width        | uint32  | 4
- *  8       | height       | uint32  | 4
- *  12      | channels     | uint8   | 1
- *  13      | red_bits     | uint8   | 1
- *  14      | green_bits   | uint8   | 1
- *  15      | blue_bits    | uint8   | 1
- *  16      | compression  | uint8   | 1   (0=none, 1=lz4)
- *  17      | image_size   | uint32  | 4
- *  21      | image_data   | bytes   | image_size
- *  21+img  | metadata     | entry[] | 256 * 12
+ *  Offset  | Field     | Type   | Size
+ *  --------|-----------|--------|-----
+ *  0       | timestamp | uint32 | 4
+ *  4       | width     | uint32 | 4
+ *  8       | height    | uint32 | 4
+ *  12      | jpeg_size | uint32 | 4
+ *  16      | jpeg_data | bytes  | jpeg_size
  *
- *  Metadata entry: char[8] name + float32 value
+ * Metadata packet layout (separate ZMQ channel, ports 5557/5558):
+ *
+ *  Offset    | Field      | Type    | Size
+ *  ----------|------------|---------|-----
+ *  0         | timestamp  | uint32  | 4
+ *  4         | count      | uint32  | 4
+ *  8 + i*12  | name[i]    | char[8] | 8  (ASCII, null-padded)
+ *  16 + i*12 | value[i]   | float32 | 4
  */
 
-#define FLYCAM_MAX_CHANNELS 3
-#define FLYCAM_MAX_METADATA 256
-#define FLYCAM_META_NAME_LEN 8
+#define FLYCAM_VIDEO_HEADER_SIZE 16
+#define FLYCAM_META_HEADER_SIZE   8
+#define FLYCAM_META_ENTRY_SIZE   12
+#define FLYCAM_MAX_METADATA      32
+#define FLYCAM_META_NAME_LEN      8
 
 typedef struct {
-  char name[FLYCAM_META_NAME_LEN + 1];
+  char  name[FLYCAM_META_NAME_LEN + 1];
   float value;
 } flycam_meta_entry_t;
 
 /* Decoded frame returned by readSocket.
- * pixels is a width*height ARGB buffer owned by this struct.
- * Free with freeFrame(). */
+ * pixels is a width*height buffer in MiniFB 0x00BBGGRR format owned by this
+ * struct.  Free with freeFrame(). */
 typedef struct {
-  uint32_t timestamp;
-  uint32_t width;
-  uint32_t height;
-  uint8_t channels;
-  uint8_t channel_bits[FLYCAM_MAX_CHANNELS];
-  uint8_t compression;
-  uint32_t image_size;
-  uint32_t wire_size; /* raw ZMQ message bytes (compressed) */
+  uint32_t            timestamp;
+  uint32_t            width;
+  uint32_t            height;
+  uint32_t            wire_size;     /* raw JPEG bytes received over the wire */
   flycam_meta_entry_t metadata[FLYCAM_MAX_METADATA];
-  uint32_t *pixels;
+  int                 metadata_count;
+  uint32_t           *pixels;
 } frame_t;
 
 typedef struct flycam_socket flycam_socket_t;
 
-flycam_socket_t *initSocket(const char *address, int timeout_ms);
-frame_t *readSocket(flycam_socket_t *sock);
-void freeFrame(frame_t *frame);
-void freeSocket(flycam_socket_t *sock);
+/* video_address : ZMQ PUB address for video frames (e.g. "tcp://host:5556").
+ * meta_address  : ZMQ PUB address for metadata     (e.g. "tcp://host:5558").
+ *                 Pass NULL to disable the metadata channel.
+ * timeout_ms    : poll timeout in milliseconds before returning NULL. */
+flycam_socket_t *initSocket(const char *video_address,
+                             const char *meta_address,
+                             int         timeout_ms);
+frame_t         *readSocket(flycam_socket_t *sock);
+void             freeFrame(frame_t *frame);
+void             freeSocket(flycam_socket_t *sock);
