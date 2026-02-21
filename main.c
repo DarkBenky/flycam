@@ -6,7 +6,8 @@
 
 #include "lib/packet.h"
 
-#define SERVER_ADDR_DEFAULT "tcp://91.98.145.193:5556"
+#define SERVER_ADDR_DEFAULT      "tcp://91.98.145.193:5556"
+#define META_ADDR_DEFAULT        "tcp://91.98.145.193:5558"
 #define POLL_TIMEOUT 16
 
 static double now_sec(void) {
@@ -19,7 +20,12 @@ int main(void) {
   const char *server_addr = getenv("FLYCAM_SERVER");
   if (!server_addr)
     server_addr = SERVER_ADDR_DEFAULT;
-  flycam_socket_t *sock = initSocket(server_addr, POLL_TIMEOUT);
+
+  const char *meta_addr = getenv("FLYCAM_META_SERVER");
+  if (!meta_addr)
+    meta_addr = META_ADDR_DEFAULT;
+
+  flycam_socket_t *sock = initSocket(server_addr, meta_addr, POLL_TIMEOUT);
   if (!sock)
     return 1;
 
@@ -46,14 +52,9 @@ int main(void) {
           freeFrame(frame);
           break;
         }
-        printf("timestamp    : %u\n", frame->timestamp);
-        printf("resolution   : %ux%u  channels: %u\n", frame->width,
-               frame->height, frame->channels);
-        printf("channel bits : R=%u G=%u B=%u\n", frame->channel_bits[0],
-               frame->channel_bits[1], frame->channel_bits[2]);
-        printf("compression  : %s\n", frame->compression ? "lz4" : "none");
-        printf("image size   : %u bytes\n", frame->image_size);
-        for (int i = 0; i < FLYCAM_MAX_METADATA; i++) {
+        printf("timestamp  : %u\n", frame->timestamp);
+        printf("resolution : %ux%u\n", frame->width, frame->height);
+        for (int i = 0; i < frame->metadata_count; i++) {
           if (frame->metadata[i].name[0] != '\0')
             printf("meta %-8s : %g\n", frame->metadata[i].name,
                    frame->metadata[i].value);
