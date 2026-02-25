@@ -112,7 +112,7 @@ def read_gps_records(
     port: str = PORT,
     baud: int = BAUD_RATE,
     timeout: float = TIMEOUT,
-    require_fix: bool = True,
+    require_fix: bool = False,
 ) -> list[GNSSRecord]:
     records: list[GNSSRecord] = []
 
@@ -165,7 +165,7 @@ def read_gps_records(
 if __name__ == "__main__":
     NUM_RECORDS = 5
     start = time.time()
-    data = read_gps_records(count=NUM_RECORDS)
+    data = read_gps_records(count=NUM_RECORDS, require_fix=False)
     elapsed = time.time() - start
 
     print(f"\nCollected {len(data)} record(s) in {elapsed:.1f}s\n")
