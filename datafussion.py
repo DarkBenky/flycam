@@ -3,6 +3,9 @@ from gps import GNSSRecord
 from gyro import GyroRecord
 from dataclasses import dataclass
 import threading
+import time
+
+GPS_TIMEOUT = 120.0  # seconds with no valid fix before IMU-only fallback kicks in
 
 
 @dataclass
@@ -20,6 +23,8 @@ class FusedRecord:
 
 _fused = FusedRecord()
 _lock = threading.Lock()
+_start_time: float = time.time()
+_last_fix_time: float = 0.0  # epoch seconds; 0 means no fix ever received
 
 def update_imu(gyro: GyroRecord) -> None:
     with _lock:
@@ -37,10 +42,14 @@ def update_imu(gyro: GyroRecord) -> None:
 
 
 def update_gps(gps: GNSSRecord) -> None:
+    global _last_fix_time
+    now = time.time()
+
     with _lock:
         _fused.last_gps_fix = gps.fix_quality or 0
 
         if gps.fix_quality and gps.fix_quality > 0:
+            _last_fix_time = now
             _fused.raw_xyz_pos_sum = (
                 _fused.raw_xyz_pos_sum[0] + (gps.latitude or 0.0),
                 _fused.raw_xyz_pos_sum[1] + (gps.longitude or 0.0),
@@ -52,31 +61,39 @@ def update_gps(gps: GNSSRecord) -> None:
                 _fused.raw_xyz_vel_sum[2] + 0.0,
             )
             _fused.count += 1
-        elif _fused.count > 0:
-            # GPS lost: dead reckon using last average velocity + IMU acceleration
-            n = _fused.count
-            ni = max(_fused.imu_count, 1)
-            last_vel = (
-                _fused.raw_xyz_vel_sum[0] / n,
-                _fused.raw_xyz_vel_sum[1] / n,
-                _fused.raw_xyz_vel_sum[2] / n,
-            )
-            avg_accel = (
-                _fused.raw_xyz_accel_sum[0] / ni,
-                _fused.raw_xyz_accel_sum[1] / ni,
-                _fused.raw_xyz_accel_sum[2] / ni,
-            )
-            _fused.raw_xyz_vel_sum = (
-                _fused.raw_xyz_vel_sum[0] + avg_accel[0],
-                _fused.raw_xyz_vel_sum[1] + avg_accel[1],
-                _fused.raw_xyz_vel_sum[2] + avg_accel[2],
-            )
-            _fused.raw_xyz_pos_sum = (
-                _fused.raw_xyz_pos_sum[0] + last_vel[0],
-                _fused.raw_xyz_pos_sum[1] + last_vel[1],
-                _fused.raw_xyz_pos_sum[2] + last_vel[2],
-            )
-            _fused.count += 1
+        else:
+            # How long since the last good fix (or since startup if never had one)
+            elapsed_no_fix = now - _last_fix_time if _last_fix_time > 0 else now - _start_time
+
+            if _fused.count > 0 or elapsed_no_fix > GPS_TIMEOUT:
+                # Bootstrap on the very first IMU-only step so we have a valid divisor.
+                # Starting position is (0,0,0) which is already the default.
+                if _fused.count == 0:
+                    _fused.count = 1
+
+                n  = _fused.count
+                ni = max(_fused.imu_count, 1)
+                last_vel = (
+                    _fused.raw_xyz_vel_sum[0] / n,
+                    _fused.raw_xyz_vel_sum[1] / n,
+                    _fused.raw_xyz_vel_sum[2] / n,
+                )
+                avg_accel = (
+                    _fused.raw_xyz_accel_sum[0] / ni,
+                    _fused.raw_xyz_accel_sum[1] / ni,
+                    _fused.raw_xyz_accel_sum[2] / ni,
+                )
+                _fused.raw_xyz_vel_sum = (
+                    _fused.raw_xyz_vel_sum[0] + avg_accel[0],
+                    _fused.raw_xyz_vel_sum[1] + avg_accel[1],
+                    _fused.raw_xyz_vel_sum[2] + avg_accel[2],
+                )
+                _fused.raw_xyz_pos_sum = (
+                    _fused.raw_xyz_pos_sum[0] + last_vel[0],
+                    _fused.raw_xyz_pos_sum[1] + last_vel[1],
+                    _fused.raw_xyz_pos_sum[2] + last_vel[2],
+                )
+                _fused.count += 1
 
 
 def get_fused() -> FusedRecord:
