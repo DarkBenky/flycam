@@ -143,11 +143,13 @@ def read_gps_records(
                 if last_rmc_time is not None and current.utc_time != last_rmc_time:
                     if not require_fix or current.status == "A":
                         records.append(current)
+                        lat = f"{current.latitude:.6f}" if current.latitude is not None else "N/A"
+                        lon = f"{current.longitude:.6f}" if current.longitude is not None else "N/A"
                         print(
                             f"[{len(records)}/{count}]  "
                             f"Time={current.utc_time}  "
-                            f"Lat={current.latitude:.6f}  "
-                            f"Lon={current.longitude:.6f}  "
+                            f"Lat={lat}  "
+                            f"Lon={lon}  "
                             f"Alt={current.altitude_m}m  "
                             f"Sats={current.satellites_used}"
                         )
