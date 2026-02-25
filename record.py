@@ -1,4 +1,4 @@
-DEBUG = True
+DEBUG = False
 DEBUG_VIDEO = "fpv.mp4"
 
 import time
@@ -6,6 +6,9 @@ import struct
 import threading
 import queue
 import cv2
+
+from gps import read_gps_records, GNSSRecord
+from gyro import read_gyro_records, GyroRecord
 
 if not DEBUG:
     from picamera2 import Picamera2
@@ -17,8 +20,8 @@ import zmq
 # and encode speed on Raspberry Pi hardware.
 JPEG_QUALITY = 75
 
-H = 320
-W = 320
+H = 480
+W = 720
 
 # Video packet header: timestamp(4) + width(4) + height(4) + jpeg_size(4)
 _VID_HDR_FMT = '<IIII'

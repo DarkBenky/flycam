@@ -178,6 +178,7 @@ if __name__ == "__main__":
     try:
         start = time.time()
         data = read_gps_records(count=NUM_RECORDS, require_fix=False)
+        print(data)
         elapsed = time.time() - start
 
         print(f"\nCollected {len(data)} record(s) in {elapsed:.1f}s\n")
