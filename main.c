@@ -5,9 +5,10 @@
 #include <MiniFB.h>
 
 #include "lib/packet.h"
+#include "lib/sensor.h"
 
-#define SERVER_ADDR_DEFAULT      "tcp://91.98.145.193:5556"
-#define META_ADDR_DEFAULT        "tcp://91.98.145.193:5558"
+#define SERVER_ADDR_DEFAULT "tcp://91.98.145.193:5556"
+#define META_ADDR_DEFAULT "tcp://91.98.145.193:5558"
 #define POLL_TIMEOUT 16
 
 static double now_sec(void) {
@@ -36,6 +37,7 @@ int main(void) {
   long log_bytes = 0;
   int log_frames = 0;
   double log_time = now_sec();
+  flycam_sensor_t sensor = {0};
 
   while (1) {
     frame_t *frame = readSocket(sock);
@@ -64,6 +66,8 @@ int main(void) {
       log_bytes += frame->wire_size;
       log_frames += 1;
 
+      sensor_from_frame(frame, &sensor);
+
       mfb_update_ex(window, frame->pixels, win_w, win_h);
       freeFrame(frame);
 
@@ -73,6 +77,7 @@ int main(void) {
         printf("[c]   %.1f KB/s  %.1f fps\n",
                (double)log_bytes / elapsed / 1024.0,
                (double)log_frames / elapsed);
+        sensor_print(&sensor);
         log_bytes = 0;
         log_frames = 0;
         log_time = t;

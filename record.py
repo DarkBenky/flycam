@@ -7,8 +7,9 @@ import threading
 import queue
 import cv2
 
-from gps import read_gps_records, GNSSRecord
-from gyro import read_gyro_records, GyroRecord
+from datafussion import update_imu, update_gps, get_fused, FusedRecord
+from gyro import read_gyro_records
+from gps import read_gps_records
 
 if not DEBUG:
     from picamera2 import Picamera2
@@ -26,24 +27,47 @@ W = 720
 # Video packet header: timestamp(4) + width(4) + height(4) + jpeg_size(4)
 _VID_HDR_FMT = '<IIII'
 _JPEG_PARAMS  = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
-_META_KEYS    = ["exposure_time", "gain", "iso", "white_balance", "focus_distance"]
+_CAM_META_KEYS = ["exposure_time", "gain", "iso", "white_balance", "focus_distance"]
+
+# How often each metadata source is sent.
+CAM_META_INTERVAL    = 5.0   # camera settings change slowly
+SENSOR_META_INTERVAL = 0.1   # sensor fusion at ~10 Hz
 
 print(f"JPEG quality: {JPEG_QUALITY}  resolution: {W}x{H}")
 
 
 def _make_video_packet(jpeg_bytes: bytes) -> bytes:
-    """Prepend a 16-byte header to the raw JPEG payload."""
     ts = int(time.time()) & 0xFFFFFFFF
     return struct.pack(_VID_HDR_FMT, ts, W, H, len(jpeg_bytes)) + jpeg_bytes
 
 
-def _make_meta_packet(metadata: dict) -> bytes:
-    """Serialize metadata as: timestamp(4) + count(4) + count*(name[8]+float32)."""
+def _make_meta_packet(cam_meta: dict, fused: FusedRecord) -> bytes:
+    """Unified packet: camera fields + sensor fusion fields."""
     ts = int(time.time()) & 0xFFFFFFFF
+    ni = max(fused.imu_count, 1)
+    sensor_values = {
+        "pos_lat": fused.fused_xyz_pos[0],
+        "pos_lon": fused.fused_xyz_pos[1],
+        "pos_alt": fused.fused_xyz_pos[2],
+        "vel_x":   fused.fused_xyz_vel[0],
+        "vel_y":   fused.fused_xyz_vel[1],
+        "vel_z":   fused.fused_xyz_vel[2],
+        "acc_x":   fused.fused_xyz_accel[0],
+        "acc_y":   fused.fused_xyz_accel[1],
+        "acc_z":   fused.fused_xyz_accel[2],
+        "gyr_x":   fused.raw_xyz_gyro_sum[0] / ni,
+        "gyr_y":   fused.raw_xyz_gyro_sum[1] / ni,
+        "gyr_z":   fused.raw_xyz_gyro_sum[2] / ni,
+        "gps_fix": float(fused.last_gps_fix),
+    }
+    all_entries = list(_CAM_META_KEYS) + list(sensor_values.keys())
     entries = [
         key.encode('ascii')[:8].ljust(8, b'\x00') +
-        struct.pack('<f', float(metadata.get(key, 0.0)))
-        for key in _META_KEYS
+        struct.pack('<f', float(
+            cam_meta.get(key, sensor_values.get(key, 0.0))
+            if key in _CAM_META_KEYS else sensor_values[key]
+        ))
+        for key in all_entries
     ]
     return struct.pack('<II', ts, len(entries)) + b''.join(entries)
 
@@ -79,9 +103,10 @@ if __name__ == "__main__":
         print(f"Debug mode: reading from '{DEBUG_VIDEO}'")
 
     # ------------------------------------------------------------------
-    # Capture thread — runs sensor capture independently so the main
-    # thread never stalls waiting for the camera.  Queue depth = 1:
-    # always process the latest frame, silently drop any that pile up.
+    # Threads:
+    #   camera  — buffers latest frame (queue depth 1, drops stale)
+    #   IMU     — reads MPU6050 as fast as I2C allows (~1 kHz)
+    #   GPS     — blocks on each NMEA sentence (~1-10 Hz)
     # ------------------------------------------------------------------
     _frame_q: queue.Queue = queue.Queue(maxsize=1)
     _stop_evt = threading.Event()
@@ -111,16 +136,34 @@ if __name__ == "__main__":
                         pass
                 _frame_q.put(raw)
 
+    def _imu_loop():
+        while not _stop_evt.is_set():
+            try:
+                update_imu(read_gyro_records()[0])
+            except Exception:
+                pass
+
+    def _gps_loop():
+        while not _stop_evt.is_set():
+            try:
+                update_gps(read_gps_records(count=1)[0])
+            except Exception:
+                pass
+
     cap_thread = threading.Thread(target=_capture_loop, daemon=True)
+    imu_thread = threading.Thread(target=_imu_loop,     daemon=True)
+    gps_thread = threading.Thread(target=_gps_loop,     daemon=True)
     cap_thread.start()
+    imu_thread.start()
+    gps_thread.start()
 
     log_bytes  = 0
     log_frames = 0
     log_time   = time.time()
 
-    META_INTERVAL   = 5.0
-    cached_metadata = {k: 0.0 for k in _META_KEYS}
-    meta_time       = 0.0
+    cached_cam_meta = {k: 0.0 for k in _CAM_META_KEYS}
+    cam_meta_time   = 0.0
+    sensor_meta_time = 0.0
 
     try:
         while True:
@@ -137,17 +180,20 @@ if __name__ == "__main__":
             video_sock.send(_make_video_packet(jpeg_bytes), copy=False)
 
             now = time.time()
-            if not DEBUG and (now - meta_time >= META_INTERVAL):
-                cam_meta = picam2.capture_metadata()
-                cached_metadata = {
-                    "exposure_time":  cam_meta.get("ExposureTime",    0),
-                    "gain":           cam_meta.get("AnalogueGain",    0),
-                    "iso":            cam_meta.get("ISOSpeedRatings", 0),
-                    "white_balance":  cam_meta.get("WhiteBalance",    0),
-                    "focus_distance": cam_meta.get("FocusDistance",   0),
+            if not DEBUG and (now - cam_meta_time >= CAM_META_INTERVAL):
+                raw = picam2.capture_metadata()
+                cached_cam_meta = {
+                    "exposure_time":  raw.get("ExposureTime",    0),
+                    "gain":           raw.get("AnalogueGain",    0),
+                    "iso":            raw.get("ISOSpeedRatings", 0),
+                    "white_balance":  raw.get("WhiteBalance",    0),
+                    "focus_distance": raw.get("FocusDistance",   0),
                 }
-                meta_time = now
-                meta_sock.send(_make_meta_packet(cached_metadata), copy=False)
+                cam_meta_time = now
+
+            if now - sensor_meta_time >= SENSOR_META_INTERVAL:
+                meta_sock.send(_make_meta_packet(cached_cam_meta, get_fused()), copy=False)
+                sensor_meta_time = now
 
             log_bytes  += len(jpeg_bytes)
             log_frames += 1
@@ -166,5 +212,7 @@ if __name__ == "__main__":
     finally:
         _stop_evt.set()
         cap_thread.join(timeout=2)
+        imu_thread.join(timeout=1)
+        gps_thread.join(timeout=1)
         if not DEBUG:
             picam2.stop()
