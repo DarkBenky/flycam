@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import sys
 import time
 from dataclasses import dataclass, field
 from typing import Optional
 
-import serial
+try:
+    import serial
+except ImportError:
+    print("ERROR: pyserial not installed. Run: pip install pyserial", file=sys.stderr)
+    sys.exit(1)
 
 PORT = "/dev/ttyS0"   # or /dev/ttyAMA0
 BAUD_RATE = 115200
@@ -115,10 +120,14 @@ def read_gps_records(
     require_fix: bool = False,
 ) -> list[GNSSRecord]:
     records: list[GNSSRecord] = []
-
-    print(f"Opening {port} at {baud} baud …")
-    with serial.Serial(port, baud, timeout=timeout) as ser:
-        print(f"Waiting for {count} valid GNSS record(s) …\n")
+    print(f"Opening {port} at {baud} baud …", flush=True)
+    try:
+        ser_obj = serial.Serial(port, baud, timeout=timeout)
+    except serial.SerialException as e:
+        print(f"ERROR: Cannot open {port}: {e}", file=sys.stderr)
+        sys.exit(1)
+    with ser_obj as ser:
+        print(f"Waiting for {count} valid GNSS record(s) …\n", flush=True)
 
         current = GNSSRecord()
         last_rmc_time: Optional[str] = None
@@ -166,20 +175,27 @@ def read_gps_records(
 
 if __name__ == "__main__":
     NUM_RECORDS = 5
-    start = time.time()
-    data = read_gps_records(count=NUM_RECORDS, require_fix=False)
-    elapsed = time.time() - start
+    try:
+        start = time.time()
+        data = read_gps_records(count=NUM_RECORDS, require_fix=False)
+        elapsed = time.time() - start
 
-    print(f"\nCollected {len(data)} record(s) in {elapsed:.1f}s\n")
-    for i, rec in enumerate(data, 1):
-        print(f"\nRecord {i}:")
-        print(f"  UTC Date/Time : {rec.utc_date} {rec.utc_time}")
-        print(f"  Status        : {'Fix OK' if rec.status == 'A' else 'No fix'}")
-        print(f"  Latitude      : {rec.latitude}")
-        print(f"  Longitude     : {rec.longitude}")
-        print(f"  Altitude      : {rec.altitude_m} m")
-        print(f"  Speed         : {rec.speed_knots} knots")
-        print(f"  Course        : {rec.course_deg}°")
-        print(f"  Fix quality   : {rec.fix_quality}")
-        print(f"  Satellites    : {rec.satellites_used}")
-        print(f"  HDOP          : {rec.hdop}")
+        print(f"\nCollected {len(data)} record(s) in {elapsed:.1f}s\n")
+        for i, rec in enumerate(data, 1):
+            print(f"\nRecord {i}:")
+            print(f"  UTC Date/Time : {rec.utc_date} {rec.utc_time}")
+            print(f"  Status        : {'Fix OK' if rec.status == 'A' else 'No fix'}")
+            print(f"  Latitude      : {rec.latitude}")
+            print(f"  Longitude     : {rec.longitude}")
+            print(f"  Altitude      : {rec.altitude_m} m")
+            print(f"  Speed         : {rec.speed_knots} knots")
+            print(f"  Course        : {rec.course_deg}°")
+            print(f"  Fix quality   : {rec.fix_quality}")
+            print(f"  Satellites    : {rec.satellites_used}")
+            print(f"  HDOP          : {rec.hdop}")
+    except KeyboardInterrupt:
+        print("\nInterrupted.")
+        sys.exit(0)
+    except Exception as e:
+        print(f"ERROR: {e}", file=sys.stderr)
+        sys.exit(1)

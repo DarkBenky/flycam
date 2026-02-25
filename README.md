@@ -1,3 +1,9 @@
+#Modules
+Waveshare Servo Driver HAT pro Raspberry Pi,
+Tříosý gyroskop + tříosý akcelerometr, 6DOF modul,
+MPU-6050
+Waveshare - LC76G Multi-GNSS Modul
+
 # Packet Structure
 
 ## Video Packet Format
