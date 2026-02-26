@@ -4,8 +4,7 @@
 
 #include <MiniFB.h>
 
-#include "lib/packet.h"
-#include "lib/sensor.h"
+#include "lib/flycam.h"
 
 #define SERVER_ADDR_DEFAULT "tcp://91.98.145.193:5556"
 #define POLL_TIMEOUT 16
@@ -21,8 +20,8 @@ int main(void) {
   if (!server_addr)
     server_addr = SERVER_ADDR_DEFAULT;
 
-  flycam_socket_t *sock = initSocket(server_addr, POLL_TIMEOUT);
-  if (!sock)
+  flycam_t *cam = flycam_create(server_addr, POLL_TIMEOUT);
+  if (!cam)
     return 1;
 
   struct mfb_window *window = NULL;
@@ -32,10 +31,9 @@ int main(void) {
   long log_bytes = 0;
   int log_frames = 0;
   double log_time = now_sec();
-  flycam_sensor_t sensor = {0};
 
   while (1) {
-    frame_t *frame = readSocket(sock);
+    flycam_frame_t *frame = flycam_poll(cam);
 
     if (frame) {
       if (!window || frame->width != win_w || frame->height != win_h) {
@@ -46,7 +44,7 @@ int main(void) {
         window = mfb_open_ex("flycam", win_w, win_h, WF_RESIZABLE);
         if (!window) {
           fprintf(stderr, "Failed to create window (%ux%u)\n", win_w, win_h);
-          freeFrame(frame);
+          flycam_frame_free(frame);
           break;
         }
         printf("timestamp  : %u\n", frame->timestamp);
@@ -56,13 +54,7 @@ int main(void) {
       log_bytes += frame->wire_size;
       log_frames += 1;
 
-      int was_valid = sensor.valid;
-      sensor_from_frame(frame, &sensor);
-      if (!was_valid && sensor.valid)
-        printf("[sensor] active (gps_fix=%.0f)\n", sensor.gps_fix);
-
       mfb_update_ex(window, frame->pixels, win_w, win_h);
-      freeFrame(frame);
 
       double t = now_sec();
       double elapsed = t - log_time;
@@ -70,11 +62,13 @@ int main(void) {
         printf("[c]   %.1f KB/s  %.1f fps\n",
                (double)log_bytes / elapsed / 1024.0,
                (double)log_frames / elapsed);
-        sensor_print(&sensor);
+        flycam_frame_print(frame);
         log_bytes = 0;
         log_frames = 0;
         log_time = t;
       }
+
+      flycam_frame_free(frame);
     } else {
       if (window) {
         mfb_update_state state = mfb_update_ex(window, NULL, win_w, win_h);
@@ -86,6 +80,6 @@ int main(void) {
 
   if (window)
     mfb_close(window);
-  freeSocket(sock);
+  flycam_destroy(cam);
   return 0;
 }
