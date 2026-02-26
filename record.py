@@ -65,7 +65,6 @@ class _S:
     vel     = [0.0, 0.0, 0.0]
     pos     = [0.0, 0.0, 0.0]
     gps_fix = 0.0
-    imu_t   = 0.0
 
 
 _lock = threading.Lock()
@@ -125,19 +124,9 @@ if __name__ == "__main__":
         while not _stop_evt.is_set():
             try:
                 rec = read_gyro_records()[0]
-                now = time.time()
                 with _lock:
-                    dt = now - _S.imu_t if _S.imu_t > 0 else 0.0
-                    _S.imu_t = now
                     _S.acc[:] = rec.acceleration
                     _S.gyr[:] = rec.gyro
-                    if 0 < dt < 0.05:
-                        _S.vel[0] += _S.acc[0] * dt
-                        _S.vel[1] += _S.acc[1] * dt
-                        _S.vel[2] += _S.acc[2] * dt
-                        _S.pos[0] += _S.vel[0] * dt
-                        _S.pos[1] += _S.vel[1] * dt
-                        _S.pos[2] += _S.vel[2] * dt
             except Exception:
                 pass
 
@@ -156,7 +145,11 @@ if __name__ == "__main__":
                             rec.longitude  or 0.0,
                             rec.altitude_m or 0.0,
                         ]
-                        _S.vel[:] = [0.0, 0.0, 0.0]
+                        _S.vel[:] = [
+                            rec.speed_knots or 0.0,
+                            rec.course_deg  or 0.0,
+                            0.0,
+                        ]
                         _S.gps_fix = float(rec.fix_quality)
                 elif rec is None:
                     reader.close()
