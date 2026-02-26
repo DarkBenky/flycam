@@ -38,10 +38,10 @@ class ServoDriver:
 
     def _set_pwm(self, channel: int, on: int, off: int) -> None:
         base = _LED0_ON_L + 4 * channel
-        self._bus.write_i2c_block_data(self._address, base, [
-            on  & 0xFF, on  >> 8,
-            off & 0xFF, off >> 8,
-        ])
+        self._bus.write_byte_data(self._address, base,     on  & 0xFF)
+        self._bus.write_byte_data(self._address, base + 1, on  >> 8)
+        self._bus.write_byte_data(self._address, base + 2, off & 0xFF)
+        self._bus.write_byte_data(self._address, base + 3, off >> 8)
 
     def set_pulse(self, channel: int, pulse_us: float) -> None:
         """Drive channel to an explicit pulse width in microseconds (500-2500)."""
@@ -68,7 +68,7 @@ if __name__ == "__main__":
     TICK_S = 0.02   # seconds between ticks
     REST_S = 1.0    # pause between servos
 
-    for ch in range(4):    # channels 0-3
+    for ch in range(16):    # channels 0-3
         print(f"servo {ch}: sweeping 0 -> 180")
         for angle in range(ANGLE_MIN, ANGLE_MAX + 1, STEP):
             driver.set_angle(ch, angle)
