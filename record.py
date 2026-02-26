@@ -75,21 +75,18 @@ def _make_meta_packet(cam_meta: dict, fused: FusedRecord) -> bytes:
 if __name__ == "__main__":
     context = zmq.Context()
 
-    # Video socket — non-blocking PUSH. CONFLATE is only valid on receivers
-    # (SUB/PULL); on PUSH it is silently ignored, so SNDHWM=1 without a send
-    # timeout would block the main loop the moment Go can't keep up.
+    # Video socket — non-blocking PUSH, drop stale frames when network is busy.
+    # CONFLATE is only valid on receivers (SUB/PULL); on a PUSH it is silently
+    # ignored so SNDHWM + SNDTIMEO=0 is the correct drop-on-full approach.
     video_sock = context.socket(zmq.PUSH)
     video_sock.setsockopt(zmq.SNDHWM, 2)
-    video_sock.setsockopt(zmq.SNDTIMEO, 0)  # never block, drop stale frames
+    video_sock.setsockopt(zmq.SNDTIMEO, 0)
     video_sock.setsockopt(zmq.LINGER, 0)
     video_sock.connect(GO_SERVER)
 
-    # Metadata socket — non-blocking PUSH, small HWM.
-    meta_sock = context.socket(zmq.PUSH)
-    meta_sock.setsockopt(zmq.SNDHWM, 4)
-    meta_sock.setsockopt(zmq.SNDTIMEO, 0)
-    meta_sock.setsockopt(zmq.LINGER, 0)
-    meta_sock.connect(GO_META_SERVER)
+    # cam_meta is written by the main loop and read by the meta thread.
+    # Dict reassignment is atomic in CPython so no lock is needed.
+    _cam_meta: dict = {k: 0.0 for k in _CAM_META_KEYS}
 
     if not DEBUG:
         picam2 = Picamera2()
@@ -111,6 +108,7 @@ if __name__ == "__main__":
     #   camera  — buffers latest frame (queue depth 1, drops stale)
     #   IMU     — reads MPU6050 as fast as I2C allows (~1 kHz)
     #   GPS     — blocks on each NMEA sentence (~1-10 Hz)
+    #   meta    — sends fused sensor + camera data at SENSOR_META_INTERVAL
     # ------------------------------------------------------------------
     _frame_q: queue.Queue = queue.Queue(maxsize=1)
     _stop_evt = threading.Event()
@@ -169,30 +167,49 @@ if __name__ == "__main__":
         if reader is not None:
             reader.close()
 
-    cap_thread = threading.Thread(target=_capture_loop, daemon=True)
-    imu_thread = threading.Thread(target=_imu_loop,     daemon=True)
-    gps_thread = threading.Thread(target=_gps_loop,     daemon=True)
+    def _meta_loop():
+        """Dedicated thread: owns its own ZMQ socket, sends at ~10 Hz.
+        Blocking sends are fine here — this thread does nothing else."""
+        print("[meta] thread started", flush=True)
+        sock = context.socket(zmq.PUSH)
+        sock.setsockopt(zmq.SNDHWM, 8)
+        sock.setsockopt(zmq.SNDTIMEO, 500)  # wait up to 500ms before giving up
+        sock.setsockopt(zmq.LINGER, 0)
+        sock.connect(GO_META_SERVER)
+        sent = 0
+        log_t = time.time()
+        while not _stop_evt.is_set():
+            try:
+                sock.send(_make_meta_packet(_cam_meta, get_fused()), copy=False)
+                sent += 1
+            except zmq.Again:
+                pass
+            now = time.time()
+            if now - log_t >= 5.0:
+                print(f"[meta] {sent / (now - log_t):.1f}/s", flush=True)
+                sent = 0
+                log_t = now
+            _stop_evt.wait(SENSOR_META_INTERVAL)
+        sock.close()
+
+    cap_thread  = threading.Thread(target=_capture_loop, daemon=True)
+    imu_thread  = threading.Thread(target=_imu_loop,     daemon=True)
+    gps_thread  = threading.Thread(target=_gps_loop,     daemon=True)
+    meta_thread = threading.Thread(target=_meta_loop,    daemon=True)
     cap_thread.start()
     imu_thread.start()
     gps_thread.start()
+    meta_thread.start()
 
-    log_bytes  = 0
+    log_bytes = 0
     log_frames = 0
-    log_time   = time.time()
-    meta_sent  = 0
-    meta_log_time = time.time()
-
-    cached_cam_meta = {k: 0.0 for k in _CAM_META_KEYS}
-    cam_meta_time   = time.time()  # don't call capture_metadata on the first frame
-    sensor_meta_time = 0.0
+    log_time  = time.time()
+    cam_meta_time = time.time()  # defer first capture_metadata call
 
     try:
         while True:
-            frame = _frame_q.get()  # block only until the next captured frame
+            frame = _frame_q.get()
 
-            # JPEG encode: much faster than custom bit-packing on Raspberry Pi
-            # and requires no intermediate buffers.  OpenCV handles BGR→YCbCr
-            # internally so the output is a standard decodable JPEG.
             ok, jpeg_buf = cv2.imencode('.jpg', frame, _JPEG_PARAMS)
             if not ok:
                 continue
@@ -206,7 +223,7 @@ if __name__ == "__main__":
             now = time.time()
             if not DEBUG and (now - cam_meta_time >= CAM_META_INTERVAL):
                 raw = picam2.capture_metadata()
-                cached_cam_meta = {
+                _cam_meta = {
                     "exposure_time":  raw.get("ExposureTime",    0),
                     "gain":           raw.get("AnalogueGain",    0),
                     "iso":            raw.get("ISOSpeedRatings", 0),
@@ -215,29 +232,16 @@ if __name__ == "__main__":
                 }
                 cam_meta_time = now
 
-            if now - sensor_meta_time >= SENSOR_META_INTERVAL:
-                try:
-                    meta_sock.send(_make_meta_packet(cached_cam_meta, get_fused()), copy=False)
-                    meta_sent += 1
-                except zmq.Again:
-                    pass
-                sensor_meta_time = now
-
             log_bytes  += len(jpeg_bytes)
             log_frames += 1
 
-            now = time.time()
             if now - log_time >= 1.0:
                 elapsed = now - log_time
-                meta_rate = meta_sent / (now - meta_log_time)
                 print(f"[py]  {log_bytes / elapsed / 1024:.1f} KB/s"
-                      f"  {log_frames / elapsed:.1f} fps"
-                      f"  meta {meta_rate:.1f}/s")
+                      f"  {log_frames / elapsed:.1f} fps")
                 log_bytes  = 0
                 log_frames = 0
                 log_time   = now
-                meta_sent  = 0
-                meta_log_time = now
 
     except KeyboardInterrupt:
         pass
@@ -246,5 +250,6 @@ if __name__ == "__main__":
         cap_thread.join(timeout=2)
         imu_thread.join(timeout=1)
         gps_thread.join(timeout=1)
+        meta_thread.join(timeout=1)
         if not DEBUG:
             picam2.stop()
