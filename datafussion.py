@@ -1,118 +1,131 @@
-from copy import copy
+import math
+import threading
+from dataclasses import dataclass
+
 from gps import GNSSRecord
 from gyro import GyroRecord
-from dataclasses import dataclass
-import threading
-import time
 
-GPS_TIMEOUT = 120.0  # seconds with no valid fix before IMU-only fallback kicks in
+ALPHA           = 0.98    # complementary filter: trust gyro 98 %, accel tilt 2 %
+G               = 9.80665 # standard gravity m/s^2
+ZUPT_ACC_THRESH = 0.3     # |acc| deviation from G below which we consider stationary
+ZUPT_GYR_THRESH = 0.05    # gyro magnitude below which we consider stationary
+GPS_VEL_INTERVAL = 60     # every N GPS readings update velocity from GPS
 
 
 @dataclass
-class FusedRecord:
-    raw_xyz_pos_sum: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    raw_xyz_vel_sum: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    raw_xyz_accel_sum: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    raw_xyz_gyro_sum: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    count: int = 0
-    imu_count: int = 0
-    last_gps_fix: int = 0
-    fused_xyz_pos: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    fused_xyz_vel: tuple[float, float, float] = (0.0, 0.0, 0.0)
-    fused_xyz_accel: tuple[float, float, float] = (0.0, 0.0, 0.0)
+class FusedState:
+    # World-space position (metres from origin; z = altitude in metres)
+    pos_x: float = 0.0
+    pos_y: float = 0.0
+    pos_z: float = 0.0
+    # World-space velocity (m/s, each axis; not normalised)
+    vel_x: float = 0.0
+    vel_y: float = 0.0
+    vel_z: float = 0.0
+    # Orientation in radians
+    rot_x: float = 0.0  # pitch
+    rot_y: float = 0.0  # roll
+    rot_z: float = 0.0  # yaw
+    gps_fix: int = 0
+    valid: bool = False
 
-_fused = FusedRecord()
+
+class _State:
+    pos        = [0.0, 0.0, 0.0]
+    vel        = [0.0, 0.0, 0.0]
+    pitch      = 0.0
+    roll       = 0.0
+    yaw        = 0.0
+    gps_fix    = 0
+    gps_count  = 0
+    t_last_imu = 0.0
+
+
+_s    = _State()
 _lock = threading.Lock()
-_start_time: float = time.time()
-_last_fix_time: float = 0.0  # epoch seconds; 0 means no fix ever received
-
-def update_imu(gyro: GyroRecord) -> None:
-    with _lock:
-        _fused.raw_xyz_accel_sum = (
-            _fused.raw_xyz_accel_sum[0] + gyro.acceleration[0],
-            _fused.raw_xyz_accel_sum[1] + gyro.acceleration[1],
-            _fused.raw_xyz_accel_sum[2] + gyro.acceleration[2],
-        )
-        _fused.raw_xyz_gyro_sum = (
-            _fused.raw_xyz_gyro_sum[0] + gyro.gyro[0],
-            _fused.raw_xyz_gyro_sum[1] + gyro.gyro[1],
-            _fused.raw_xyz_gyro_sum[2] + gyro.gyro[2],
-        )
-        _fused.imu_count += 1
 
 
-def update_gps(gps: GNSSRecord) -> None:
-    global _last_fix_time
-    now = time.time()
+def update_imu(rec: GyroRecord) -> None:
+    ax, ay, az = rec.acceleration
+    gx, gy, gz = rec.gyro
+    now = rec.timestamp
 
     with _lock:
-        _fused.last_gps_fix = gps.fix_quality or 0
+        dt = now - _s.t_last_imu if _s.t_last_imu > 0.0 else 0.0
+        _s.t_last_imu = now
 
-        if gps.fix_quality and gps.fix_quality > 0:
-            _last_fix_time = now
-            _fused.raw_xyz_pos_sum = (
-                _fused.raw_xyz_pos_sum[0] + (gps.latitude or 0.0),
-                _fused.raw_xyz_pos_sum[1] + (gps.longitude or 0.0),
-                _fused.raw_xyz_pos_sum[2] + (gps.altitude_m or 0.0),
-            )
-            _fused.raw_xyz_vel_sum = (
-                _fused.raw_xyz_vel_sum[0] + (gps.speed_knots or 0.0),
-                _fused.raw_xyz_vel_sum[1] + (gps.course_deg or 0.0),
-                _fused.raw_xyz_vel_sum[2] + 0.0,
-            )
-            _fused.count += 1
+        if not (0.0 < dt < 0.5):
+            return
+
+        # --- Orientation (complementary filter) ---
+        acc_mag = math.sqrt(ax * ax + ay * ay + az * az)
+        if 0.5 * G < acc_mag < 2.0 * G:
+            acc_pitch = math.atan2(-ax, math.sqrt(ay * ay + az * az))
+            acc_roll  = math.atan2(ay, az)
+            _s.pitch = ALPHA * (_s.pitch + gy * dt) + (1.0 - ALPHA) * acc_pitch
+            _s.roll  = ALPHA * (_s.roll  + gx * dt) + (1.0 - ALPHA) * acc_roll
         else:
-            # How long since the last good fix (or since startup if never had one)
-            elapsed_no_fix = now - _last_fix_time if _last_fix_time > 0 else now - _start_time
+            _s.pitch += gy * dt
+            _s.roll  += gx * dt
+        _s.yaw += gz * dt
 
-            if _fused.count > 0 or elapsed_no_fix > GPS_TIMEOUT:
-                # Bootstrap on the very first IMU-only step so we have a valid divisor.
-                # Starting position is (0,0,0) which is already the default.
-                if _fused.count == 0:
-                    _fused.count = 1
+        # --- Remove gravity from body-frame acceleration ---
+        sp = math.sin(_s.pitch); cp = math.cos(_s.pitch)
+        sr = math.sin(_s.roll);  cr = math.cos(_s.roll)
+        cy = math.cos(_s.yaw);   sy = math.sin(_s.yaw)
+        lax = ax - (-G * sp)
+        lay = ay - ( G * cp * sr)
+        laz = az - ( G * cp * cr)
 
-                n  = _fused.count
-                ni = max(_fused.imu_count, 1)
-                last_vel = (
-                    _fused.raw_xyz_vel_sum[0] / n,
-                    _fused.raw_xyz_vel_sum[1] / n,
-                    _fused.raw_xyz_vel_sum[2] / n,
-                )
-                avg_accel = (
-                    _fused.raw_xyz_accel_sum[0] / ni,
-                    _fused.raw_xyz_accel_sum[1] / ni,
-                    _fused.raw_xyz_accel_sum[2] / ni,
-                )
-                _fused.raw_xyz_vel_sum = (
-                    _fused.raw_xyz_vel_sum[0] + avg_accel[0],
-                    _fused.raw_xyz_vel_sum[1] + avg_accel[1],
-                    _fused.raw_xyz_vel_sum[2] + avg_accel[2],
-                )
-                _fused.raw_xyz_pos_sum = (
-                    _fused.raw_xyz_pos_sum[0] + last_vel[0],
-                    _fused.raw_xyz_pos_sum[1] + last_vel[1],
-                    _fused.raw_xyz_pos_sum[2] + last_vel[2],
-                )
-                _fused.count += 1
+        # --- Rotate linear acceleration to world frame: R = Rz(yaw)*Ry(pitch)*Rx(roll) ---
+        wx = cy*cp*lax + (cy*sp*sr - sy*cr)*lay + (cy*sp*cr + sy*sr)*laz
+        wy = sy*cp*lax + (sy*sp*sr + cy*cr)*lay + (sy*sp*cr - cy*sr)*laz
+        wz =   -sp*lax +       cp*sr*lay         +       cp*cr*laz
+
+        # --- ZUPT: zero velocity when stationary to stop bias drift ---
+        gyro_mag = math.sqrt(gx * gx + gy * gy + gz * gz)
+        if abs(acc_mag - G) < ZUPT_ACC_THRESH and gyro_mag < ZUPT_GYR_THRESH:
+            _s.vel[:] = [0.0, 0.0, 0.0]
+        else:
+            _s.vel[0] += wx * dt
+            _s.vel[1] += wy * dt
+            _s.vel[2] += wz * dt
+
+        _s.pos[0] += _s.vel[0] * dt
+        _s.pos[1] += _s.vel[1] * dt
+        _s.pos[2] += _s.vel[2] * dt
 
 
-def get_fused() -> FusedRecord:
+def update_gps(rec: GNSSRecord) -> None:
+    if not rec.fix_quality or rec.fix_quality <= 0:
+        return
+
     with _lock:
-        n = max(_fused.count, 1)
-        ni = max(_fused.imu_count, 1)
-        _fused.fused_xyz_pos = (
-            _fused.raw_xyz_pos_sum[0] / n,
-            _fused.raw_xyz_pos_sum[1] / n,
-            _fused.raw_xyz_pos_sum[2] / n,
+        _s.gps_fix = rec.fix_quality
+        _s.gps_count += 1
+
+        # Periodically anchor velocity from GPS to limit dead-reckoning drift.
+        if _s.gps_count % GPS_VEL_INTERVAL == 1:
+            speed_ms   = (rec.speed_knots or 0.0) * 0.514444
+            course_rad = math.radians(rec.course_deg or 0.0)
+            # Course is clockwise from North; map to (East, North, Up) world frame.
+            _s.vel[:] = [
+                speed_ms * math.sin(course_rad),
+                speed_ms * math.cos(course_rad),
+                0.0,
+            ]
+
+        # On the very first fix set altitude so z = 0 at the launch site.
+        if _s.gps_count == 1:
+            _s.pos[2] = rec.altitude_m or 0.0
+
+
+def get_fused() -> FusedState:
+    with _lock:
+        return FusedState(
+            pos_x=_s.pos[0], pos_y=_s.pos[1], pos_z=_s.pos[2],
+            vel_x=_s.vel[0], vel_y=_s.vel[1], vel_z=_s.vel[2],
+            rot_x=_s.pitch,  rot_y=_s.roll,   rot_z=_s.yaw,
+            gps_fix=_s.gps_fix,
+            valid=True,
         )
-        _fused.fused_xyz_vel = (
-            _fused.raw_xyz_vel_sum[0] / n,
-            _fused.raw_xyz_vel_sum[1] / n,
-            _fused.raw_xyz_vel_sum[2] / n,
-        )
-        _fused.fused_xyz_accel = (
-            _fused.raw_xyz_accel_sum[0] / ni,
-            _fused.raw_xyz_accel_sum[1] / ni,
-            _fused.raw_xyz_accel_sum[2] / ni,
-        )
-        return copy(_fused)

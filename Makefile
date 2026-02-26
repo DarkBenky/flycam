@@ -5,13 +5,13 @@ CFLAGS  = -O2 -Wall -Wextra
 LIBS    = -lminifb -lzmq -ljpeg -lX11 -lGL -lm
 
 TARGET  = main
-SRCS    = main.c lib/packet.c lib/sensor.c
+SRCS    = main.c lib/packet.c lib/sensor.c lib/flycam.c
 
 .PHONY: all clean
 
 all: $(TARGET)
 
-$(TARGET): $(SRCS) lib/packet.h lib/sensor.h
+$(TARGET): $(SRCS) lib/packet.h lib/sensor.h lib/flycam.h
 	$(CC) $(CFLAGS) -o $@ $(SRCS) $(LIBS)
 
 clean:
