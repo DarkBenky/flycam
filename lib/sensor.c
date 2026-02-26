@@ -36,6 +36,12 @@ static float *_field(flycam_sensor_t *s, const char *name) {
 }
 
 void sensor_from_frame(const frame_t *frame, flycam_sensor_t *out) {
+  /* No metadata attached to this frame — keep whatever state we already have.
+   * metadata_count stays > 0 once the first meta packet is cached by the
+   * socket layer, so this only guards the window before any meta arrives. */
+  if (frame->metadata_count == 0)
+    return;
+
   memset(out, 0, sizeof(*out));
   for (int i = 0; i < frame->metadata_count; i++) {
     const flycam_meta_entry_t *e = &frame->metadata[i];

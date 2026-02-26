@@ -112,6 +112,60 @@ def parse_sentence(line: str, record: GNSSRecord) -> None:
         _parse_gga(fields, record)
 
 
+class GPSReader:
+    """Persistent NMEA reader — opens the serial port once and streams records.
+    Use this in long-running threads instead of read_gps_records, which
+    opens and closes the port on every call."""
+
+    def __init__(self, port: str = PORT, baud: int = BAUD_RATE,
+                 timeout: float = TIMEOUT) -> None:
+        print(f"Opening {port} at {baud} baud …", flush=True)
+        try:
+            self._ser = serial.Serial(port, baud, timeout=timeout)
+        except serial.SerialException as e:
+            print(f"ERROR: Cannot open {port}: {e}", file=sys.stderr)
+            raise
+        self._current = GNSSRecord()
+        self._last_rmc_time: Optional[str] = None
+
+    def read_one(self) -> Optional[GNSSRecord]:
+        """Block until the next complete NMEA epoch (one full RMC cycle).
+        Returns None on serial error; the caller should then close and retry."""
+        while True:
+            try:
+                raw_line = self._ser.readline()
+            except serial.SerialException:
+                return None
+            if not raw_line:
+                continue
+            try:
+                line = raw_line.decode("ascii", errors="replace").strip()
+            except Exception:
+                continue
+            if not line:
+                continue
+
+            self._current.raw.append(line)
+            parse_sentence(line, self._current)
+
+            if line.startswith(("$GNRMC", "$GPRMC")):
+                if (self._last_rmc_time is not None
+                        and self._current.utc_time != self._last_rmc_time):
+                    completed = self._current
+                    self._current = GNSSRecord()
+                    self._current.raw.append(line)
+                    parse_sentence(line, self._current)
+                    self._last_rmc_time = self._current.utc_time
+                    return completed
+                self._last_rmc_time = self._current.utc_time
+
+    def close(self) -> None:
+        try:
+            self._ser.close()
+        except Exception:
+            pass
+
+
 def read_gps_records(
     count: int = 5,
     port: str = PORT,

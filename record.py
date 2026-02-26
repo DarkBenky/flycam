@@ -9,7 +9,7 @@ import cv2
 
 from datafussion import update_imu, update_gps, get_fused, FusedRecord
 from gyro import read_gyro_records
-from gps import read_gps_records
+from gps import GPSReader
 
 if not DEBUG:
     from picamera2 import Picamera2
@@ -144,11 +144,24 @@ if __name__ == "__main__":
                 pass
 
     def _gps_loop():
+        reader: GPSReader | None = None
         while not _stop_evt.is_set():
             try:
-                update_gps(read_gps_records(count=1)[0])
+                if reader is None:
+                    reader = GPSReader()
+                rec = reader.read_one()
+                if rec is not None:
+                    update_gps(rec)
+                else:
+                    # serial error — reopen on next iteration
+                    reader.close()
+                    reader = None
             except Exception:
-                pass
+                if reader is not None:
+                    reader.close()
+                    reader = None
+        if reader is not None:
+            reader.close()
 
     cap_thread = threading.Thread(target=_capture_loop, daemon=True)
     imu_thread = threading.Thread(target=_imu_loop,     daemon=True)

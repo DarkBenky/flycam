@@ -66,7 +66,11 @@ int main(void) {
       log_bytes += frame->wire_size;
       log_frames += 1;
 
+      int was_valid = sensor.valid;
       sensor_from_frame(frame, &sensor);
+      if (!was_valid && sensor.valid)
+        printf("[sensor] meta channel active (%d entries)\n",
+               frame->metadata_count);
 
       mfb_update_ex(window, frame->pixels, win_w, win_h);
       freeFrame(frame);
