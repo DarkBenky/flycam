@@ -21,6 +21,11 @@ H = 480
 W = 720
 GPS_ANCHOR_INTERVAL = 60  # frames between GPS anchor attempts
 
+# Zero-velocity update (ZUPT): if the IMU looks stationary, zero velocity
+# to prevent bias double-integration drift.
+ZUPT_ACC_THRESH = 0.3   # m/s² — max deviation of |acc| from G to be considered still
+ZUPT_GYR_THRESH = 0.05  # rad/s — max gyro magnitude to be considered still
+
 # Packet layout (80-byte header + JPEG):
 #   [0]  timestamp  u32
 #   [4]  width      u32
@@ -180,6 +185,12 @@ if __name__ == "__main__":
                         _S.vel[0] += wx * dt
                         _S.vel[1] += wy * dt
                         _S.vel[2] += wz * dt
+
+                        # ZUPT: if stationary, zero velocity to stop bias drift.
+                        gyr_mag = math.sqrt(gx*gx + gy*gy + gz*gz)
+                        if abs(mag - G) < ZUPT_ACC_THRESH and gyr_mag < ZUPT_GYR_THRESH:
+                            _S.vel[:] = [0.0, 0.0, 0.0]
+
                         _S.pos[0] += _S.vel[0] * dt
                         _S.pos[1] += _S.vel[1] * dt
                         _S.pos[2] += _S.vel[2] * dt
