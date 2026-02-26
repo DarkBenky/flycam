@@ -137,6 +137,7 @@ if __name__ == "__main__":
                 _frame_q.put(raw)
 
     def _imu_loop():
+        print("[imu]  thread started", flush=True)
         while not _stop_evt.is_set():
             try:
                 update_imu(read_gyro_records()[0])
@@ -144,6 +145,7 @@ if __name__ == "__main__":
                 pass
 
     def _gps_loop():
+        print("[gps]  thread started", flush=True)
         reader: GPSReader | None = None
         while not _stop_evt.is_set():
             try:
@@ -177,7 +179,7 @@ if __name__ == "__main__":
     meta_log_time = time.time()
 
     cached_cam_meta = {k: 0.0 for k in _CAM_META_KEYS}
-    cam_meta_time   = 0.0
+    cam_meta_time   = time.time()  # don't call capture_metadata on the first frame
     sensor_meta_time = 0.0
 
     try:

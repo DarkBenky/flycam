@@ -1,8 +1,13 @@
 #include "packet.h"
 
-#include <jpeglib.h>
-#include <setjmp.h>
+/* stddef.h and stdio.h must come before jpeglib.h — it uses size_t and FILE
+ * but does not include them itself. clang-format off prevents re-sorting. */
+// clang-format off
+#include <stddef.h>
 #include <stdio.h>
+#include <jpeglib.h>
+// clang-format on
+#include <setjmp.h>
 #include <stdlib.h>
 #include <string.h>
 #include <zmq.h>

@@ -121,7 +121,10 @@ class GPSReader:
                  timeout: float = TIMEOUT) -> None:
         print(f"Opening {port} at {baud} baud …", flush=True)
         try:
-            self._ser = serial.Serial(port, baud, timeout=timeout)
+            self._ser = serial.Serial(
+                port, baud, timeout=timeout,
+                dsrdtr=False, rtscts=False, xonxoff=False,
+            )
         except serial.SerialException as e:
             print(f"ERROR: Cannot open {port}: {e}", file=sys.stderr)
             raise
