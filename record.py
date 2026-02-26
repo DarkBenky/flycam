@@ -75,16 +75,20 @@ def _make_meta_packet(cam_meta: dict, fused: FusedRecord) -> bytes:
 if __name__ == "__main__":
     context = zmq.Context()
 
-    # Video socket — drop all but the latest frame.
+    # Video socket — non-blocking PUSH. CONFLATE is only valid on receivers
+    # (SUB/PULL); on PUSH it is silently ignored, so SNDHWM=1 without a send
+    # timeout would block the main loop the moment Go can't keep up.
     video_sock = context.socket(zmq.PUSH)
-    video_sock.setsockopt(zmq.CONFLATE, 1)
-    video_sock.setsockopt(zmq.SNDHWM, 1)
+    video_sock.setsockopt(zmq.SNDHWM, 2)
+    video_sock.setsockopt(zmq.SNDTIMEO, 0)  # never block, drop stale frames
+    video_sock.setsockopt(zmq.LINGER, 0)
     video_sock.connect(GO_SERVER)
 
-    # Metadata socket — small HWM so stale packets don't pile up,
-    # but NO CONFLATE: CONFLATE on a PUSH silently drops outgoing packets.
+    # Metadata socket — non-blocking PUSH, small HWM.
     meta_sock = context.socket(zmq.PUSH)
     meta_sock.setsockopt(zmq.SNDHWM, 4)
+    meta_sock.setsockopt(zmq.SNDTIMEO, 0)
+    meta_sock.setsockopt(zmq.LINGER, 0)
     meta_sock.connect(GO_META_SERVER)
 
     if not DEBUG:
@@ -194,7 +198,10 @@ if __name__ == "__main__":
                 continue
             jpeg_bytes = jpeg_buf.tobytes()
 
-            video_sock.send(_make_video_packet(jpeg_bytes), copy=False)
+            try:
+                video_sock.send(_make_video_packet(jpeg_bytes), copy=False)
+            except zmq.Again:
+                pass  # downstream full, drop this frame
 
             now = time.time()
             if not DEBUG and (now - cam_meta_time >= CAM_META_INTERVAL):
@@ -209,9 +216,12 @@ if __name__ == "__main__":
                 cam_meta_time = now
 
             if now - sensor_meta_time >= SENSOR_META_INTERVAL:
-                meta_sock.send(_make_meta_packet(cached_cam_meta, get_fused()), copy=False)
+                try:
+                    meta_sock.send(_make_meta_packet(cached_cam_meta, get_fused()), copy=False)
+                    meta_sent += 1
+                except zmq.Again:
+                    pass
                 sensor_meta_time = now
-                meta_sent += 1
 
             log_bytes  += len(jpeg_bytes)
             log_frames += 1
