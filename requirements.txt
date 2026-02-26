@@ -3,3 +3,5 @@ numpy
 opencv-python
 picamera2
 zmq
+smbus2
+RPi.GPIO
