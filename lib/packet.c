@@ -12,14 +12,18 @@
 #include <string.h>
 #include <zmq.h>
 
-#define VIDEO_HEADER_SIZE                                                      \
-  16 /* timestamp(4) + width(4) + height(4) + jpeg_size(4) */
-#define META_HEADER_SIZE 8 /* timestamp(4) + count(4) */
-#define META_ENTRY_SIZE 12 /* name[8] + float32(4) */
+#define VIDEO_HEADER_SIZE FLYCAM_VIDEO_HEADER_SIZE /* 68 */
 
 static inline uint32_t read_u32le(const uint8_t *p) {
   return (uint32_t)p[0] | ((uint32_t)p[1] << 8) | ((uint32_t)p[2] << 16) |
          ((uint32_t)p[3] << 24);
+}
+
+static inline float read_f32le(const uint8_t *p) {
+  uint32_t u = read_u32le(p);
+  float f;
+  memcpy(&f, &u, sizeof(float));
+  return f;
 }
 
 /* ---- JPEG decode -------------------------------------------------- */
@@ -106,17 +110,13 @@ static int decode_jpeg_to_pixels(const uint8_t *jpeg_data, uint32_t jpeg_size,
 
 struct flycam_socket {
   void *zmq_ctx;
-  void *zmq_video; /* SUB socket for video frames */
-  void *zmq_meta;  /* SUB socket for metadata (may be NULL) */
+  void *zmq_video;
   int timeout_ms;
   zmq_msg_t msg;
   int msg_open;
-  flycam_meta_entry_t cached_meta[FLYCAM_MAX_METADATA];
-  int cached_meta_count;
 };
 
-flycam_socket_t *initSocket(const char *video_address, const char *meta_address,
-                            int timeout_ms) {
+flycam_socket_t *initSocket(const char *video_address, int timeout_ms) {
   flycam_socket_t *sock = (flycam_socket_t *)calloc(1, sizeof(*sock));
   if (!sock)
     return NULL;
@@ -124,98 +124,19 @@ flycam_socket_t *initSocket(const char *video_address, const char *meta_address,
   sock->timeout_ms = timeout_ms;
   sock->zmq_ctx = zmq_ctx_new();
 
-  /* Video subscriber */
   sock->zmq_video = zmq_socket(sock->zmq_ctx, ZMQ_SUB);
   int conflate = 1, hwm = 1;
   zmq_setsockopt(sock->zmq_video, ZMQ_CONFLATE, &conflate, sizeof(conflate));
   zmq_setsockopt(sock->zmq_video, ZMQ_RCVHWM, &hwm, sizeof(hwm));
 
   if (zmq_connect(sock->zmq_video, video_address) != 0) {
-    fprintf(stderr, "initSocket: failed to connect video to %s\n",
-            video_address);
+    fprintf(stderr, "initSocket: failed to connect to %s\n", video_address);
     freeSocket(sock);
     return NULL;
   }
   zmq_setsockopt(sock->zmq_video, ZMQ_SUBSCRIBE, "", 0);
-  printf("initSocket: video connected to %s\n", video_address);
-
-  /* Metadata subscriber (optional) */
-  if (meta_address) {
-    sock->zmq_meta = zmq_socket(sock->zmq_ctx, ZMQ_SUB);
-    zmq_setsockopt(sock->zmq_meta, ZMQ_CONFLATE, &conflate, sizeof(conflate));
-    zmq_setsockopt(sock->zmq_meta, ZMQ_RCVHWM, &hwm, sizeof(hwm));
-
-    if (zmq_connect(sock->zmq_meta, meta_address) != 0) {
-      fprintf(stderr,
-              "initSocket: failed to connect meta to %s (continuing without)\n",
-              meta_address);
-      zmq_close(sock->zmq_meta);
-      sock->zmq_meta = NULL;
-    } else {
-      zmq_setsockopt(sock->zmq_meta, ZMQ_SUBSCRIBE, "", 0);
-      printf("initSocket: meta  connected to %s\n", meta_address);
-    }
-  }
-
+  printf("initSocket: connected to %s\n", video_address);
   return sock;
-}
-
-/* Drain any queued metadata messages (non-blocking) and update cache. */
-static void poll_meta(flycam_socket_t *sock) {
-  if (!sock->zmq_meta)
-    return;
-
-  zmq_msg_t msg;
-  zmq_msg_init(&msg);
-  int received = 0;
-
-  while (zmq_msg_recv(&msg, sock->zmq_meta, ZMQ_DONTWAIT) != -1) {
-    received = 1;
-    const uint8_t *buf = (const uint8_t *)zmq_msg_data(&msg);
-    size_t len = zmq_msg_size(&msg);
-
-    if (len < META_HEADER_SIZE) {
-      zmq_msg_close(&msg);
-      zmq_msg_init(&msg);
-      continue;
-    }
-
-    uint32_t count = read_u32le(buf + 4);
-    if (count > FLYCAM_MAX_METADATA)
-      count = FLYCAM_MAX_METADATA;
-
-    if (len < META_HEADER_SIZE + (size_t)count * META_ENTRY_SIZE) {
-      zmq_msg_close(&msg);
-      zmq_msg_init(&msg);
-      continue;
-    }
-
-    sock->cached_meta_count = 0;
-    const uint8_t *entry = buf + META_HEADER_SIZE;
-    for (uint32_t i = 0; i < count; i++, entry += META_ENTRY_SIZE) {
-      memcpy(sock->cached_meta[i].name, entry, FLYCAM_META_NAME_LEN);
-      sock->cached_meta[i].name[FLYCAM_META_NAME_LEN] = '\0';
-      memcpy(&sock->cached_meta[i].value, entry + FLYCAM_META_NAME_LEN,
-             sizeof(float));
-      sock->cached_meta_count++;
-    }
-
-    zmq_msg_close(&msg);
-    zmq_msg_init(&msg);
-  }
-  zmq_msg_close(&msg);
-
-  if (received) {
-    static int first = 1;
-    if (first) {
-      printf("[meta] first packet received: %d entries\n",
-             sock->cached_meta_count);
-      for (int i = 0; i < sock->cached_meta_count; i++)
-        printf("[meta]   [%d] %-9s = %g\n", i, sock->cached_meta[i].name,
-               sock->cached_meta[i].value);
-      first = 0;
-    }
-  }
 }
 
 frame_t *readSocket(flycam_socket_t *sock) {
@@ -227,13 +148,8 @@ frame_t *readSocket(flycam_socket_t *sock) {
     sock->msg_open = 0;
   }
 
-  /* Drain any queued metadata first (non-blocking). */
-  poll_meta(sock);
-
-  /* Wait for the next video frame. */
   zmq_pollitem_t items[1] = {{sock->zmq_video, 0, ZMQ_POLLIN, 0}};
-  int rc = zmq_poll(items, 1, sock->timeout_ms);
-  if (rc <= 0)
+  if (zmq_poll(items, 1, sock->timeout_ms) <= 0)
     return NULL;
 
   zmq_msg_init(&sock->msg);
@@ -260,32 +176,27 @@ frame_t *readSocket(flycam_socket_t *sock) {
     fprintf(stderr, "readSocket: zero dimension (%ux%u)\n", width, height);
     return NULL;
   }
-
   size_t pixel_count = (size_t)width * height;
-  if (pixel_count / width != height) { /* overflow check */
+  if (pixel_count / width != height) {
     fprintf(stderr, "readSocket: dimension overflow\n");
     return NULL;
   }
-
   if (wire_size < VIDEO_HEADER_SIZE + (size_t)jpeg_size) {
-    fprintf(stderr, "readSocket: truncated JPEG (need %u, got %zu)\n",
+    fprintf(stderr, "readSocket: truncated JPEG (need %u got %zu)\n",
             VIDEO_HEADER_SIZE + jpeg_size, wire_size);
     return NULL;
   }
 
-  const uint8_t *jpeg_data = buf + VIDEO_HEADER_SIZE;
-
   frame_t *frame = (frame_t *)malloc(sizeof(*frame));
   if (!frame)
     return NULL;
-
   frame->pixels = (uint32_t *)malloc(pixel_count * sizeof(uint32_t));
   if (!frame->pixels) {
     free(frame);
     return NULL;
   }
 
-  if (decode_jpeg_to_pixels(jpeg_data, jpeg_size, width, height,
+  if (decode_jpeg_to_pixels(buf + VIDEO_HEADER_SIZE, jpeg_size, width, height,
                             frame->pixels) != 0) {
     fprintf(stderr, "readSocket: JPEG decode failed\n");
     free(frame->pixels);
@@ -297,9 +208,21 @@ frame_t *readSocket(flycam_socket_t *sock) {
   frame->width = width;
   frame->height = height;
   frame->wire_size = (uint32_t)wire_size;
-  frame->metadata_count = sock->cached_meta_count;
-  memcpy(frame->metadata, sock->cached_meta,
-         (size_t)sock->cached_meta_count * sizeof(flycam_meta_entry_t));
+
+  /* Parse sensor fields directly from header offsets 16..67 */
+  frame->pos_lat = read_f32le(buf + 16);
+  frame->pos_lon = read_f32le(buf + 20);
+  frame->pos_alt = read_f32le(buf + 24);
+  frame->vel_x = read_f32le(buf + 28);
+  frame->vel_y = read_f32le(buf + 32);
+  frame->vel_z = read_f32le(buf + 36);
+  frame->acc_x = read_f32le(buf + 40);
+  frame->acc_y = read_f32le(buf + 44);
+  frame->acc_z = read_f32le(buf + 48);
+  frame->gyr_x = read_f32le(buf + 52);
+  frame->gyr_y = read_f32le(buf + 56);
+  frame->gyr_z = read_f32le(buf + 60);
+  frame->gps_fix = read_f32le(buf + 64);
 
   return frame;
 }
@@ -318,8 +241,6 @@ void freeSocket(flycam_socket_t *sock) {
     zmq_msg_close(&sock->msg);
   if (sock->zmq_video)
     zmq_close(sock->zmq_video);
-  if (sock->zmq_meta)
-    zmq_close(sock->zmq_meta);
   if (sock->zmq_ctx)
     zmq_ctx_destroy(sock->zmq_ctx);
   free(sock);

@@ -8,7 +8,6 @@
 #include "lib/sensor.h"
 
 #define SERVER_ADDR_DEFAULT "tcp://91.98.145.193:5556"
-#define META_ADDR_DEFAULT "tcp://91.98.145.193:5558"
 #define POLL_TIMEOUT 16
 
 static double now_sec(void) {
@@ -22,11 +21,7 @@ int main(void) {
   if (!server_addr)
     server_addr = SERVER_ADDR_DEFAULT;
 
-  const char *meta_addr = getenv("FLYCAM_META_SERVER");
-  if (!meta_addr)
-    meta_addr = META_ADDR_DEFAULT;
-
-  flycam_socket_t *sock = initSocket(server_addr, meta_addr, POLL_TIMEOUT);
+  flycam_socket_t *sock = initSocket(server_addr, POLL_TIMEOUT);
   if (!sock)
     return 1;
 
@@ -56,11 +51,6 @@ int main(void) {
         }
         printf("timestamp  : %u\n", frame->timestamp);
         printf("resolution : %ux%u\n", frame->width, frame->height);
-        for (int i = 0; i < frame->metadata_count; i++) {
-          if (frame->metadata[i].name[0] != '\0')
-            printf("meta %-8s : %g\n", frame->metadata[i].name,
-                   frame->metadata[i].value);
-        }
       }
 
       log_bytes += frame->wire_size;
@@ -69,8 +59,7 @@ int main(void) {
       int was_valid = sensor.valid;
       sensor_from_frame(frame, &sensor);
       if (!was_valid && sensor.valid)
-        printf("[sensor] meta channel active (%d entries)\n",
-               frame->metadata_count);
+        printf("[sensor] active (gps_fix=%.0f)\n", sensor.gps_fix);
 
       mfb_update_ex(window, frame->pixels, win_w, win_h);
       freeFrame(frame);
