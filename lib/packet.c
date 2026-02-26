@@ -160,8 +160,10 @@ static void poll_meta(flycam_socket_t *sock) {
 
   zmq_msg_t msg;
   zmq_msg_init(&msg);
+  int received = 0;
 
   while (zmq_msg_recv(&msg, sock->zmq_meta, ZMQ_DONTWAIT) != -1) {
+    received = 1;
     const uint8_t *buf = (const uint8_t *)zmq_msg_data(&msg);
     size_t         len = zmq_msg_size(&msg);
 
@@ -195,6 +197,17 @@ static void poll_meta(flycam_socket_t *sock) {
     zmq_msg_init(&msg);
   }
   zmq_msg_close(&msg);
+
+  if (received) {
+    static int first = 1;
+    if (first) {
+      printf("[meta] first packet received: %d entries\n", sock->cached_meta_count);
+      for (int i = 0; i < sock->cached_meta_count; i++)
+        printf("[meta]   [%d] %-9s = %g\n", i, sock->cached_meta[i].name,
+               sock->cached_meta[i].value);
+      first = 0;
+    }
+  }
 }
 
 frame_t *readSocket(flycam_socket_t *sock) {

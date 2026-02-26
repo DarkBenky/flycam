@@ -81,10 +81,10 @@ if __name__ == "__main__":
     video_sock.setsockopt(zmq.SNDHWM, 1)
     video_sock.connect(GO_SERVER)
 
-    # Metadata socket — separate channel, updated infrequently.
+    # Metadata socket — small HWM so stale packets don't pile up,
+    # but NO CONFLATE: CONFLATE on a PUSH silently drops outgoing packets.
     meta_sock = context.socket(zmq.PUSH)
-    meta_sock.setsockopt(zmq.CONFLATE, 1)
-    meta_sock.setsockopt(zmq.SNDHWM, 1)
+    meta_sock.setsockopt(zmq.SNDHWM, 4)
     meta_sock.connect(GO_META_SERVER)
 
     if not DEBUG:
@@ -173,6 +173,8 @@ if __name__ == "__main__":
     log_bytes  = 0
     log_frames = 0
     log_time   = time.time()
+    meta_sent  = 0
+    meta_log_time = time.time()
 
     cached_cam_meta = {k: 0.0 for k in _CAM_META_KEYS}
     cam_meta_time   = 0.0
@@ -207,6 +209,7 @@ if __name__ == "__main__":
             if now - sensor_meta_time >= SENSOR_META_INTERVAL:
                 meta_sock.send(_make_meta_packet(cached_cam_meta, get_fused()), copy=False)
                 sensor_meta_time = now
+                meta_sent += 1
 
             log_bytes  += len(jpeg_bytes)
             log_frames += 1
@@ -214,11 +217,15 @@ if __name__ == "__main__":
             now = time.time()
             if now - log_time >= 1.0:
                 elapsed = now - log_time
+                meta_rate = meta_sent / (now - meta_log_time)
                 print(f"[py]  {log_bytes / elapsed / 1024:.1f} KB/s"
-                      f"  {log_frames / elapsed:.1f} fps")
+                      f"  {log_frames / elapsed:.1f} fps"
+                      f"  meta {meta_rate:.1f}/s")
                 log_bytes  = 0
                 log_frames = 0
                 log_time   = now
+                meta_sent  = 0
+                meta_log_time = now
 
     except KeyboardInterrupt:
         pass
