@@ -3,53 +3,52 @@
 #include <stdint.h>
 
 /*
- * Binary packet layout:
+ * Packet layout (80-byte header + JPEG):
  *
- *  Offset  | Field        | Type    | Size
- *  --------|--------------|---------|-----
- *  0       | timestamp    | uint32  | 4
- *  4       | width        | uint32  | 4
- *  8       | height       | uint32  | 4
- *  12      | channels     | uint8   | 1
- *  13      | red_bits     | uint8   | 1
- *  14      | green_bits   | uint8   | 1
- *  15      | blue_bits    | uint8   | 1
- *  16      | compression  | uint8   | 1   (0=none, 1=lz4)
- *  17      | image_size   | uint32  | 4
- *  21      | image_data   | bytes   | image_size
- *  21+img  | metadata     | entry[] | 256 * 12
- *
- *  Metadata entry: char[8] name + float32 value
+ *  Offset | Field     | Type    | Size
+ *  -------|-----------|---------|-----
+ *  0      | timestamp | uint32  | 4
+ *  4      | width     | uint32  | 4
+ *  8      | height    | uint32  | 4
+ *  12     | jpeg_size | uint32  | 4
+ *  16     | pos_x     | float32 | 4  (lat/lon/alt with GPS, metres without)
+ *  20     | pos_y     | float32 | 4
+ *  24     | pos_z     | float32 | 4
+ *  28     | vel_x     | float32 | 4
+ *  32     | vel_y     | float32 | 4
+ *  36     | vel_z     | float32 | 4
+ *  40     | acc_x     | float32 | 4
+ *  44     | acc_y     | float32 | 4
+ *  48     | acc_z     | float32 | 4
+ *  52     | gyr_x     | float32 | 4
+ *  56     | gyr_y     | float32 | 4
+ *  60     | gyr_z     | float32 | 4
+ *  64     | pitch     | float32 | 4  (radians, complementary filter)
+ *  68     | roll      | float32 | 4
+ *  72     | yaw       | float32 | 4  (gyro-integrated, drifts without mag)
+ *  76     | gps_fix   | float32 | 4  (0=no fix)
+ *  80     | jpeg_data | bytes   | jpeg_size
  */
 
-#define FLYCAM_MAX_CHANNELS 3
-#define FLYCAM_MAX_METADATA 256
-#define FLYCAM_META_NAME_LEN 8
+#define FLYCAM_VIDEO_HEADER_SIZE 80
 
-typedef struct {
-  char name[FLYCAM_META_NAME_LEN + 1];
-  float value;
-} flycam_meta_entry_t;
-
-/* Decoded frame returned by readSocket.
- * pixels is a width*height ARGB buffer owned by this struct.
- * Free with freeFrame(). */
 typedef struct {
   uint32_t timestamp;
   uint32_t width;
   uint32_t height;
-  uint8_t channels;
-  uint8_t channel_bits[FLYCAM_MAX_CHANNELS];
-  uint8_t compression;
-  uint32_t image_size;
-  uint32_t wire_size; /* raw ZMQ message bytes (compressed) */
-  flycam_meta_entry_t metadata[FLYCAM_MAX_METADATA];
+  uint32_t wire_size;
+  float pos_x, pos_y, pos_z;
+  float vel_x, vel_y, vel_z;
+  float acc_x, acc_y, acc_z;
+  float gyr_x, gyr_y, gyr_z;
+  float pitch, roll, yaw;
+  float gps_fix;
   uint32_t *pixels;
 } frame_t;
 
 typedef struct flycam_socket flycam_socket_t;
 
-flycam_socket_t *initSocket(const char *address, int timeout_ms);
+flycam_socket_t *initSocket(const char *video_address, int timeout_ms);
 frame_t *readSocket(flycam_socket_t *sock);
 void freeFrame(frame_t *frame);
 void freeSocket(flycam_socket_t *sock);

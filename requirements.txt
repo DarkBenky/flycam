@@ -2,5 +2,6 @@ Cython
 numpy
 opencv-python
 picamera2
-lz4
 zmq
+smbus2
+RPi.GPIO

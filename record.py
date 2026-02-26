@@ -1,13 +1,14 @@
-DEBUG = True
+DEBUG = False
 DEBUG_VIDEO = "fpv.mp4"
 
 import time
 import struct
 import threading
 import queue
-import numpy as np
 import cv2
-import lz4.block
+
+from gyro import read_gyro_records
+from gps import GPSReader
 
 if not DEBUG:
     from picamera2 import Picamera2
@@ -15,96 +16,87 @@ if not DEBUG:
 from env import GO_SERVER
 import zmq
 
-try:
-    import quant
-except ImportError:
-    import subprocess
-    import sys
-    print("Building Cython extension quant...")
-    subprocess.run(
-        [sys.executable, "setup.py", "build_ext", "--inplace"],
-        check=True
-    )
-    import quant
+JPEG_QUALITY = 75
+H = 480
+W = 720
+GPS_ANCHOR_INTERVAL = 60  # frames between GPS anchor attempts
+
+# Zero-velocity update (ZUPT): if the IMU looks stationary, zero velocity
+# to prevent bias double-integration drift.
+ZUPT_ACC_THRESH = 0.3   # m/s² — max deviation of |acc| from G to be considered still
+ZUPT_GYR_THRESH = 0.05  # rad/s — max gyro magnitude to be considered still
+
+# Packet layout (80-byte header + JPEG):
+#   [0]  timestamp  u32
+#   [4]  width      u32
+#   [8]  height     u32
+#   [12] jpeg_size  u32
+#   [16] pos_x      f32  (lat/lon/alt from GPS, or dead-reckoned metres)
+#   [20] pos_y      f32
+#   [24] pos_z      f32
+#   [28] vel_x      f32  (m/s world frame, or speed_knots from GPS)
+#   [32] vel_y      f32  (m/s, or course_deg from GPS)
+#   [36] vel_z      f32
+#   [40] acc_x      f32
+#   [44] acc_y      f32
+#   [48] acc_z      f32
+#   [52] gyr_x      f32
+#   [56] gyr_y      f32
+#   [60] gyr_z      f32
+#   [64] pitch      f32  (radians, complementary filter)
+#   [68] roll       f32
+#   [72] yaw        f32  (radians, gyro-integrated — drifts without magnetometer)
+#   [76] gps_fix    f32  (0=no fix)
+#   [80] jpeg bytes
+_HDR_FMT  = '<IIII16f'
+_HDR_SIZE = struct.calcsize(_HDR_FMT)  # 80
+_JPEG_PARAMS = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
+
+print(f"JPEG quality: {JPEG_QUALITY}  resolution: {W}x{H}  header: {_HDR_SIZE}B")
 
 
-
-CHANNEL_BITS = [3, 5, 4]
-
-H = 320
-W = 320
-C = 3
-
-USE_COMPRESSION = True
-
-print(f"Frame size: {H * W * (CHANNEL_BITS[0] + CHANNEL_BITS[1] + CHANNEL_BITS[2]) / 8 / 1024:.2f} KB")
-
-# ---------------------------------------------------------------------------
-# Fast serialization — fixed header fields written once at startup.
-# Per frame we only update: timestamp (4 B), compression flag (1 B),
-# image_size (4 B), image bytes, and 5 metadata float values.
-# ---------------------------------------------------------------------------
-_HEADER_SIZE = 21          # 4+4+4+1+3+1+4
-_IMAGE_MAX   = (H * W * sum(CHANNEL_BITS) + 7) // 8
-_META_KEYS   = ["exposure_time", "gain", "iso", "white_balance", "focus_distance"]
-_META_SIZE   = 256 * 12    # keep protocol-compatible with C decoder
-
-_out_buf = bytearray(_HEADER_SIZE + _IMAGE_MAX + 64 + _META_SIZE)
-
-# Write constant header fields once
-struct.pack_into('I', _out_buf,  4, W)
-struct.pack_into('I', _out_buf,  8, H)
-struct.pack_into('B', _out_buf, 12, C)
-_out_buf[13] = CHANNEL_BITS[0]
-_out_buf[14] = CHANNEL_BITS[1]
-_out_buf[15] = CHANNEL_BITS[2]
-
-# Pre-populate metadata name fields (only float values change per frame)
-_meta_buf = bytearray(_META_SIZE)
-for _i, _key in enumerate(_META_KEYS):
-    _off = _i * 12
-    _meta_buf[_off:_off + 8] = _key.encode('ascii')[:8].ljust(8, b'\x00')
-
-
-def _serialize(packed_frame, metadata: dict) -> bytes:
-    """Serialize into the shared buffer and return an immutable bytes copy."""
+def _pack(jpeg_bytes: bytes, pos, vel, acc, gyr, pitch: float, roll: float, yaw: float, gps_fix: float) -> bytes:
     ts = int(time.time()) & 0xFFFFFFFF
+    return struct.pack(
+        _HDR_FMT, ts, W, H, len(jpeg_bytes),
+        pos[0], pos[1], pos[2],
+        vel[0], vel[1], vel[2],
+        acc[0], acc[1], acc[2],
+        gyr[0], gyr[1], gyr[2],
+        pitch, roll, yaw,
+        gps_fix,
+    ) + jpeg_bytes
 
-    raw = bytes(packed_frame)
-    if USE_COMPRESSION:
-        img_data = lz4.block.compress(raw, store_size=False)
-        _out_buf[16] = 1
-    else:
-        img_data = raw
-        _out_buf[16] = 0
 
-    img_len = len(img_data)
-    struct.pack_into('I', _out_buf, 0,  ts)
-    struct.pack_into('I', _out_buf, 17, img_len)
-    _out_buf[_HEADER_SIZE : _HEADER_SIZE + img_len] = img_data
+# Shared sensor state — class fields are mutable so inner functions can write
+class _S:
+    acc          = [0.0, 0.0, 0.0]
+    gyr          = [0.0, 0.0, 0.0]
+    vel          = [0.0, 0.0, 0.0]   # m/s world frame
+    pos          = [0.0, 0.0, 0.0]   # metres from origin (or lat/lon/alt after GPS anchor)
+    pitch        = 0.0               # radians, complementary filter
+    roll         = 0.0
+    yaw          = 0.0               # radians, gyro-integrated
+    gps_fix      = 0.0               # 0 = never had fix
+    gps_pending  = None              # latest GPS fix dict, set by GPS thread
 
-    meta_start = _HEADER_SIZE + img_len
-    _out_buf[meta_start : meta_start + _META_SIZE] = _meta_buf
-    for i, key in enumerate(_META_KEYS):
-        struct.pack_into('f', _out_buf, meta_start + i * 12 + 8,
-                         float(metadata.get(key, 0.0)))
 
-    return bytes(_out_buf[:meta_start + _META_SIZE])
+_lock = threading.Lock()
+
 
 if __name__ == "__main__":
     context = zmq.Context()
-    socket = context.socket(zmq.PUSH)
-    # Drop all but the latest frame: never queue stale frames.
-    socket.setsockopt(zmq.CONFLATE, 1)
-    socket.setsockopt(zmq.SNDHWM, 1)
-    socket.connect(GO_SERVER)
-    socket.setsockopt(zmq.SNDBUF, H * W * (CHANNEL_BITS[0] + CHANNEL_BITS[1] + CHANNEL_BITS[2]) // 8 * 2)
+    sock = context.socket(zmq.PUSH)
+    sock.setsockopt(zmq.SNDHWM, 2)
+    sock.setsockopt(zmq.SNDTIMEO, 0)
+    sock.setsockopt(zmq.LINGER, 0)
+    sock.connect(GO_SERVER)
 
     if not DEBUG:
         picam2 = Picamera2()
         config = picam2.create_preview_configuration(
-            main={"size": (W, H), "format": "RGB888"},
-            controls={"FrameDurationLimits": (16666, 16666)}  # 60fps
+            main={"size": (W, H), "format": "BGR888"},
+            controls={"FrameDurationLimits": (16666, 16666)},
         )
         picam2.configure(config)
         picam2.start()
@@ -114,11 +106,6 @@ if __name__ == "__main__":
             raise RuntimeError(f"Cannot open debug video: {DEBUG_VIDEO}")
         print(f"Debug mode: reading from '{DEBUG_VIDEO}'")
 
-    # ------------------------------------------------------------------
-    # Capture thread — runs sensor capture independently so the main
-    # thread never stalls waiting for the camera.  Queue depth = 1:
-    # always process the latest frame, silently drop any that pile up.
-    # ------------------------------------------------------------------
     _frame_q: queue.Queue = queue.Queue(maxsize=1)
     _stop_evt = threading.Event()
 
@@ -138,9 +125,7 @@ if __name__ == "__main__":
                 if not ret:
                     cap.set(cv2.CAP_PROP_POS_FRAMES, 0)
                     ret, raw = cap.read()
-                raw = cv2.cvtColor(raw, cv2.COLOR_BGR2RGB)
                 raw = cv2.resize(raw, (W, H))
-                raw = np.asarray(raw, dtype=np.uint8)
                 if _frame_q.full():
                     try:
                         _frame_q.get_nowait()
@@ -148,49 +133,153 @@ if __name__ == "__main__":
                         pass
                 _frame_q.put(raw)
 
+    def _imu_loop():
+        import math
+        # Complementary filter coefficient: 0.98 = trust gyro 98 %, acc 2 %.
+        # Acc corrects long-term tilt drift; gyro handles fast motion.
+        ALPHA = 0.98
+        G = 9.80665
+        t_last = 0.0
+        print("[imu] thread started", flush=True)
+        while not _stop_evt.is_set():
+            try:
+                rec = read_gyro_records()[0]
+                ax, ay, az = rec.acceleration
+                gx, gy, gz = rec.gyro
+                now = time.time()
+                dt  = now - t_last if t_last > 0.0 else 0.0
+                t_last = now
+
+                with _lock:
+                    _S.acc[:] = [ax, ay, az]
+                    _S.gyr[:] = [gx, gy, gz]
+
+                    if 0.0 < dt < 0.1:
+                        # --- Orientation (complementary filter) ---
+                        mag = math.sqrt(ax*ax + ay*ay + az*az)
+                        if 0.5 * G < mag < 2.0 * G:
+                            acc_pitch = math.atan2(-ax, math.sqrt(ay*ay + az*az))
+                            acc_roll  = math.atan2(ay, az)
+                            _S.pitch = ALPHA * (_S.pitch + gy * dt) + (1.0 - ALPHA) * acc_pitch
+                            _S.roll  = ALPHA * (_S.roll  + gx * dt) + (1.0 - ALPHA) * acc_roll
+                        else:
+                            _S.pitch += gy * dt
+                            _S.roll  += gx * dt
+                        _S.yaw += gz * dt
+
+                        # --- Dead-reckoning (always runs; GPS anchor resets pos/vel) ---
+                        cp = math.cos(_S.pitch); sp = math.sin(_S.pitch)
+                        cr = math.cos(_S.roll);  sr = math.sin(_S.roll)
+                        cy = math.cos(_S.yaw);   sy = math.sin(_S.yaw)
+
+                        # Remove gravity from body-frame acceleration.
+                        lax = ax - (-G * sp)
+                        lay = ay - ( G * cp * sr)
+                        laz = az - ( G * cp * cr)
+
+                        # Rotate to world frame: R = Rz(yaw)*Ry(pitch)*Rx(roll)
+                        wx = cy*cp*lax + (cy*sp*sr - sy*cr)*lay + (cy*sp*cr + sy*sr)*laz
+                        wy = sy*cp*lax + (sy*sp*sr + cy*cr)*lay + (sy*sp*cr - cy*sr)*laz
+                        wz =   -sp*lax +        cp*sr*lay       +        cp*cr*laz
+
+                        _S.vel[0] += wx * dt
+                        _S.vel[1] += wy * dt
+                        _S.vel[2] += wz * dt
+
+                        # ZUPT: if stationary, zero velocity to stop bias drift.
+                        gyr_mag = math.sqrt(gx*gx + gy*gy + gz*gz)
+                        if abs(mag - G) < ZUPT_ACC_THRESH and gyr_mag < ZUPT_GYR_THRESH:
+                            _S.vel[:] = [0.0, 0.0, 0.0]
+
+                        _S.pos[0] += _S.vel[0] * dt
+                        _S.pos[1] += _S.vel[1] * dt
+                        _S.pos[2] += _S.vel[2] * dt
+            except Exception:
+                pass
+
+    def _gps_loop():
+        print("[gps] thread started", flush=True)
+        reader: GPSReader | None = None
+        while not _stop_evt.is_set():
+            try:
+                if reader is None:
+                    reader = GPSReader()
+                rec = reader.read_one()
+                if rec is not None and rec.fix_quality and rec.fix_quality > 0:
+                    # Store the fix for the main loop to consume every 60 frames.
+                    with _lock:
+                        _S.gps_pending = {
+                            'lat': rec.latitude   or 0.0,
+                            'lon': rec.longitude  or 0.0,
+                            'alt': rec.altitude_m or 0.0,
+                            'spd': rec.speed_knots or 0.0,
+                            'crs': rec.course_deg  or 0.0,
+                            'fix': float(rec.fix_quality),
+                        }
+                elif rec is None:
+                    reader.close()
+                    reader = None
+            except Exception:
+                if reader is not None:
+                    reader.close()
+                    reader = None
+        if reader is not None:
+            reader.close()
+
     cap_thread = threading.Thread(target=_capture_loop, daemon=True)
+    imu_thread = threading.Thread(target=_imu_loop,     daemon=True)
+    gps_thread = threading.Thread(target=_gps_loop,     daemon=True)
     cap_thread.start()
+    imu_thread.start()
+    gps_thread.start()
 
-    log_bytes  = 0
-    log_frames = 0
-    log_time   = time.time()
-
-    META_INTERVAL   = 5.0
-    cached_metadata = {k: 0.0 for k in _META_KEYS}
-    meta_time = 0.0
+    log_bytes   = 0
+    log_frames  = 0
+    log_time    = time.time()
+    frame_count = 0
 
     try:
         while True:
-            frame = _frame_q.get()  # block only until the next captured frame
+            frame = _frame_q.get()
 
-            # Single-pass quantize + pack (was two separate Cython calls)
-            packed = quant.quantize_and_pack(frame, CHANNEL_BITS)
+            ok, jpeg_buf = cv2.imencode('.jpg', frame, _JPEG_PARAMS)
+            if not ok:
+                continue
+            jpeg_bytes = jpeg_buf.tobytes()
+
+            frame_count += 1
+
+            with _lock:
+                # Every GPS_ANCHOR_INTERVAL frames: anchor pos/vel from GPS if a fix is pending.
+                if frame_count % GPS_ANCHOR_INTERVAL == 0 and _S.gps_pending is not None:
+                    g = _S.gps_pending
+                    _S.pos[:] = [g['lat'], g['lon'], g['alt']]
+                    _S.vel[:] = [g['spd'], g['crs'], 0.0]
+                    _S.gps_fix = g['fix']
+                    _S.gps_pending = None
+                    print(f"[gps] anchor  lat={g['lat']:.5f}  lon={g['lon']:.5f}"
+                          f"  alt={g['alt']:.1f}m  fix={int(g['fix'])}", flush=True)
+
+                pkt = _pack(jpeg_bytes, _S.pos, _S.vel, _S.acc, _S.gyr,
+                            _S.pitch, _S.roll, _S.yaw, _S.gps_fix)
+
+            try:
+                sock.send(pkt, copy=False)
+            except zmq.Again:
+                pass
 
             now = time.time()
-            if not DEBUG and (now - meta_time >= META_INTERVAL):
-                cam_meta = picam2.capture_metadata()
-                cached_metadata = {
-                    "exposure_time":  cam_meta.get("ExposureTime",    0),
-                    "gain":           cam_meta.get("AnalogueGain",    0),
-                    "iso":            cam_meta.get("ISOSpeedRatings", 0),
-                    "white_balance":  cam_meta.get("WhiteBalance",    0),
-                    "focus_distance": cam_meta.get("FocusDistance",   0),
-                }
-                meta_time = now
-
-            serialized = _serialize(packed, cached_metadata)
-            # copy=False: ZMQ won't make an extra internal copy of the
-            # already-immutable bytes object
-            socket.send(serialized, copy=False)
-
-            log_bytes  += len(serialized)
+            log_bytes  += len(jpeg_bytes)
             log_frames += 1
-
-            now = time.time()
             if now - log_time >= 1.0:
                 elapsed = now - log_time
-                print(f"[py]  {log_bytes / elapsed / 1024:.1f} KB/s"
-                      f"  {log_frames / elapsed:.1f} fps")
+                gfix = "fix" if _S.gps_fix > 0 else "none"
+                print(
+                    f"[py]  {log_bytes / elapsed / 1024:.1f} KB/s"
+                    f"  {log_frames / elapsed:.1f} fps"
+                    f"  gps={gfix}",
+                    flush=True,
+                )
                 log_bytes  = 0
                 log_frames = 0
                 log_time   = now
@@ -200,5 +289,9 @@ if __name__ == "__main__":
     finally:
         _stop_evt.set()
         cap_thread.join(timeout=2)
+        imu_thread.join(timeout=1)
+        gps_thread.join(timeout=2)
         if not DEBUG:
             picam2.stop()
+        sock.close()
+        context.term()

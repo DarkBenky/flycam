@@ -4,7 +4,7 @@ set -e
 # Install system dependencies
 # Note: libcamera and its Python bindings come pre-installed on Raspberry Pi OS
 sudo apt update
-sudo apt install -y python3-dev python3-venv build-essential libcap-dev
+sudo apt install -y python3-dev python3-venv build-essential libcap-dev libjpeg-dev
 
 # Create virtual environment with system site packages to access libcamera
 if [ ! -d ".venv" ]; then

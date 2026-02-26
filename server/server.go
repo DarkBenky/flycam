@@ -3,7 +3,6 @@ package main
 import (
 	"fmt"
 	"log"
-	"sync"
 	"time"
 
 	zmq "github.com/pebbe/zmq4"
@@ -12,11 +11,6 @@ import (
 const (
 	pullAddr = "tcp://*:5555"
 	pubAddr  = "tcp://*:5556"
-)
-
-var (
-	latestFrame []byte
-	mu          sync.RWMutex
 )
 
 func main() {
@@ -53,8 +47,7 @@ func main() {
 	}
 
 	fmt.Printf("flycam server running\n")
-	fmt.Printf("  PULL %s\n", pullAddr)
-	fmt.Printf("  PUB  %s\n", pubAddr)
+	fmt.Printf("  video PULL %s  PUB %s\n", pullAddr, pubAddr)
 
 	var totalBytes int64
 	var frameCount int64
@@ -66,10 +59,6 @@ func main() {
 			log.Printf("Recv error: %v", err)
 			continue
 		}
-
-		mu.Lock()
-		latestFrame = data
-		mu.Unlock()
 
 		if _, err := pub.SendBytes(data, 0); err != nil {
 			log.Printf("Pub send error: %v", err)
