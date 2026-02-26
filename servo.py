@@ -68,12 +68,13 @@ if __name__ == "__main__":
     TICK_S = 0.02   # seconds between ticks
     REST_S = 1.0    # pause between servos
 
-    for ch in range(16):    # channels 0-3
-        print(f"servo {ch}: sweeping 0 -> 180")
-        for angle in range(ANGLE_MIN, ANGLE_MAX + 1, STEP):
-            driver.set_angle(ch, angle)
-            time.sleep(TICK_S)
-        driver.set_angle(ch, 0)   # return to home
-        time.sleep(REST_S)
+    while True:
+        for ch in range(4):    # channels 0-3
+            print(f"servo {ch}: sweeping 0 -> 180")
+            for angle in range(ANGLE_MIN, ANGLE_MAX + 1, STEP):
+                driver.set_angle(ch, angle)
+                time.sleep(TICK_S)
+            driver.set_angle(ch, 0)   # return to home
+            time.sleep(REST_S)
 
-    driver.close()
+    # driver.close()
