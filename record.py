@@ -1,6 +1,7 @@
 DEBUG = False
 DEBUG_VIDEO = "fpv.mp4"
 
+import math
 import time
 import struct
 import threading
@@ -134,7 +135,6 @@ if __name__ == "__main__":
                 _frame_q.put(raw)
 
     def _imu_loop():
-        import math
         # Complementary filter coefficient: 0.98 = trust gyro 98 %, acc 2 %.
         # Acc corrects long-term tilt drift; gyro handles fast motion.
         ALPHA = 0.98
@@ -254,7 +254,15 @@ if __name__ == "__main__":
                 if frame_count % GPS_ANCHOR_INTERVAL == 0 and _S.gps_pending is not None:
                     g = _S.gps_pending
                     _S.pos[:] = [g['lat'], g['lon'], g['alt']]
-                    _S.vel[:] = [g['spd'], g['crs'], 0.0]
+                    # Convert GPS speed (knots) + course (degrees clockwise from North)
+                    # to world-frame velocity (East, North, Up) in m/s.
+                    speed_ms   = g['spd'] * 0.514444
+                    course_rad = math.radians(g['crs'])
+                    _S.vel[:] = [
+                        speed_ms * math.sin(course_rad),
+                        speed_ms * math.cos(course_rad),
+                        0.0,
+                    ]
                     _S.gps_fix = g['fix']
                     _S.gps_pending = None
                     print(f"[gps] anchor  lat={g['lat']:.5f}  lon={g['lon']:.5f}"
