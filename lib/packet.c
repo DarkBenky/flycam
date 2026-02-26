@@ -209,10 +209,9 @@ frame_t *readSocket(flycam_socket_t *sock) {
   frame->height = height;
   frame->wire_size = (uint32_t)wire_size;
 
-  /* Parse sensor fields directly from header offsets 16..67 */
-  frame->pos_lat = read_f32le(buf + 16);
-  frame->pos_lon = read_f32le(buf + 20);
-  frame->pos_alt = read_f32le(buf + 24);
+  frame->pos_x = read_f32le(buf + 16);
+  frame->pos_y = read_f32le(buf + 20);
+  frame->pos_z = read_f32le(buf + 24);
   frame->vel_x = read_f32le(buf + 28);
   frame->vel_y = read_f32le(buf + 32);
   frame->vel_z = read_f32le(buf + 36);
@@ -222,7 +221,10 @@ frame_t *readSocket(flycam_socket_t *sock) {
   frame->gyr_x = read_f32le(buf + 52);
   frame->gyr_y = read_f32le(buf + 56);
   frame->gyr_z = read_f32le(buf + 60);
-  frame->gps_fix = read_f32le(buf + 64);
+  frame->pitch = read_f32le(buf + 64);
+  frame->roll = read_f32le(buf + 68);
+  frame->yaw = read_f32le(buf + 72);
+  frame->gps_fix = read_f32le(buf + 76);
 
   return frame;
 }

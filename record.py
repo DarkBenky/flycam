@@ -19,17 +19,18 @@ import zmq
 JPEG_QUALITY = 75
 H = 480
 W = 720
+GPS_ANCHOR_INTERVAL = 60  # frames between GPS anchor attempts
 
-# Packet layout (68-byte header + JPEG):
+# Packet layout (80-byte header + JPEG):
 #   [0]  timestamp  u32
 #   [4]  width      u32
 #   [8]  height     u32
 #   [12] jpeg_size  u32
-#   [16] pos_lat    f32
-#   [20] pos_lon    f32
-#   [24] pos_alt    f32
-#   [28] vel_x      f32
-#   [32] vel_y      f32
+#   [16] pos_x      f32  (lat/lon/alt from GPS, or dead-reckoned metres)
+#   [20] pos_y      f32
+#   [24] pos_z      f32
+#   [28] vel_x      f32  (m/s world frame, or speed_knots from GPS)
+#   [32] vel_y      f32  (m/s, or course_deg from GPS)
 #   [36] vel_z      f32
 #   [40] acc_x      f32
 #   [44] acc_y      f32
@@ -37,16 +38,19 @@ W = 720
 #   [52] gyr_x      f32
 #   [56] gyr_y      f32
 #   [60] gyr_z      f32
-#   [64] gps_fix    f32  (0=no fix)
-#   [68] jpeg bytes
-_HDR_FMT  = '<IIII13f'
-_HDR_SIZE = struct.calcsize(_HDR_FMT)  # 68
+#   [64] pitch      f32  (radians, complementary filter)
+#   [68] roll       f32
+#   [72] yaw        f32  (radians, gyro-integrated — drifts without magnetometer)
+#   [76] gps_fix    f32  (0=no fix)
+#   [80] jpeg bytes
+_HDR_FMT  = '<IIII16f'
+_HDR_SIZE = struct.calcsize(_HDR_FMT)  # 80
 _JPEG_PARAMS = [cv2.IMWRITE_JPEG_QUALITY, JPEG_QUALITY]
 
 print(f"JPEG quality: {JPEG_QUALITY}  resolution: {W}x{H}  header: {_HDR_SIZE}B")
 
 
-def _pack(jpeg_bytes: bytes, pos, vel, acc, gyr, gps_fix: float) -> bytes:
+def _pack(jpeg_bytes: bytes, pos, vel, acc, gyr, pitch: float, roll: float, yaw: float, gps_fix: float) -> bytes:
     ts = int(time.time()) & 0xFFFFFFFF
     return struct.pack(
         _HDR_FMT, ts, W, H, len(jpeg_bytes),
@@ -54,17 +58,22 @@ def _pack(jpeg_bytes: bytes, pos, vel, acc, gyr, gps_fix: float) -> bytes:
         vel[0], vel[1], vel[2],
         acc[0], acc[1], acc[2],
         gyr[0], gyr[1], gyr[2],
+        pitch, roll, yaw,
         gps_fix,
     ) + jpeg_bytes
 
 
 # Shared sensor state — class fields are mutable so inner functions can write
 class _S:
-    acc     = [0.0, 0.0, 0.0]
-    gyr     = [0.0, 0.0, 0.0]
-    vel     = [0.0, 0.0, 0.0]
-    pos     = [0.0, 0.0, 0.0]
-    gps_fix = 0.0
+    acc          = [0.0, 0.0, 0.0]
+    gyr          = [0.0, 0.0, 0.0]
+    vel          = [0.0, 0.0, 0.0]   # m/s world frame
+    pos          = [0.0, 0.0, 0.0]   # metres from origin (or lat/lon/alt after GPS anchor)
+    pitch        = 0.0               # radians, complementary filter
+    roll         = 0.0
+    yaw          = 0.0               # radians, gyro-integrated
+    gps_fix      = 0.0               # 0 = never had fix
+    gps_pending  = None              # latest GPS fix dict, set by GPS thread
 
 
 _lock = threading.Lock()
@@ -120,13 +129,60 @@ if __name__ == "__main__":
                 _frame_q.put(raw)
 
     def _imu_loop():
+        import math
+        # Complementary filter coefficient: 0.98 = trust gyro 98 %, acc 2 %.
+        # Acc corrects long-term tilt drift; gyro handles fast motion.
+        ALPHA = 0.98
+        G = 9.80665
+        t_last = 0.0
         print("[imu] thread started", flush=True)
         while not _stop_evt.is_set():
             try:
                 rec = read_gyro_records()[0]
+                ax, ay, az = rec.acceleration
+                gx, gy, gz = rec.gyro
+                now = time.time()
+                dt  = now - t_last if t_last > 0.0 else 0.0
+                t_last = now
+
                 with _lock:
-                    _S.acc[:] = rec.acceleration
-                    _S.gyr[:] = rec.gyro
+                    _S.acc[:] = [ax, ay, az]
+                    _S.gyr[:] = [gx, gy, gz]
+
+                    if 0.0 < dt < 0.1:
+                        # --- Orientation (complementary filter) ---
+                        mag = math.sqrt(ax*ax + ay*ay + az*az)
+                        if 0.5 * G < mag < 2.0 * G:
+                            acc_pitch = math.atan2(-ax, math.sqrt(ay*ay + az*az))
+                            acc_roll  = math.atan2(ay, az)
+                            _S.pitch = ALPHA * (_S.pitch + gy * dt) + (1.0 - ALPHA) * acc_pitch
+                            _S.roll  = ALPHA * (_S.roll  + gx * dt) + (1.0 - ALPHA) * acc_roll
+                        else:
+                            _S.pitch += gy * dt
+                            _S.roll  += gx * dt
+                        _S.yaw += gz * dt
+
+                        # --- Dead-reckoning (always runs; GPS anchor resets pos/vel) ---
+                        cp = math.cos(_S.pitch); sp = math.sin(_S.pitch)
+                        cr = math.cos(_S.roll);  sr = math.sin(_S.roll)
+                        cy = math.cos(_S.yaw);   sy = math.sin(_S.yaw)
+
+                        # Remove gravity from body-frame acceleration.
+                        lax = ax - (-G * sp)
+                        lay = ay - ( G * cp * sr)
+                        laz = az - ( G * cp * cr)
+
+                        # Rotate to world frame: R = Rz(yaw)*Ry(pitch)*Rx(roll)
+                        wx = cy*cp*lax + (cy*sp*sr - sy*cr)*lay + (cy*sp*cr + sy*sr)*laz
+                        wy = sy*cp*lax + (sy*sp*sr + cy*cr)*lay + (sy*sp*cr - cy*sr)*laz
+                        wz =   -sp*lax +        cp*sr*lay       +        cp*cr*laz
+
+                        _S.vel[0] += wx * dt
+                        _S.vel[1] += wy * dt
+                        _S.vel[2] += wz * dt
+                        _S.pos[0] += _S.vel[0] * dt
+                        _S.pos[1] += _S.vel[1] * dt
+                        _S.pos[2] += _S.vel[2] * dt
             except Exception:
                 pass
 
@@ -139,18 +195,16 @@ if __name__ == "__main__":
                     reader = GPSReader()
                 rec = reader.read_one()
                 if rec is not None and rec.fix_quality and rec.fix_quality > 0:
+                    # Store the fix for the main loop to consume every 60 frames.
                     with _lock:
-                        _S.pos[:] = [
-                            rec.latitude   or 0.0,
-                            rec.longitude  or 0.0,
-                            rec.altitude_m or 0.0,
-                        ]
-                        _S.vel[:] = [
-                            rec.speed_knots or 0.0,
-                            rec.course_deg  or 0.0,
-                            0.0,
-                        ]
-                        _S.gps_fix = float(rec.fix_quality)
+                        _S.gps_pending = {
+                            'lat': rec.latitude   or 0.0,
+                            'lon': rec.longitude  or 0.0,
+                            'alt': rec.altitude_m or 0.0,
+                            'spd': rec.speed_knots or 0.0,
+                            'crs': rec.course_deg  or 0.0,
+                            'fix': float(rec.fix_quality),
+                        }
                 elif rec is None:
                     reader.close()
                     reader = None
@@ -168,9 +222,10 @@ if __name__ == "__main__":
     imu_thread.start()
     gps_thread.start()
 
-    log_bytes  = 0
-    log_frames = 0
-    log_time   = time.time()
+    log_bytes   = 0
+    log_frames  = 0
+    log_time    = time.time()
+    frame_count = 0
 
     try:
         while True:
@@ -181,8 +236,21 @@ if __name__ == "__main__":
                 continue
             jpeg_bytes = jpeg_buf.tobytes()
 
+            frame_count += 1
+
             with _lock:
-                pkt = _pack(jpeg_bytes, _S.pos, _S.vel, _S.acc, _S.gyr, _S.gps_fix)
+                # Every GPS_ANCHOR_INTERVAL frames: anchor pos/vel from GPS if a fix is pending.
+                if frame_count % GPS_ANCHOR_INTERVAL == 0 and _S.gps_pending is not None:
+                    g = _S.gps_pending
+                    _S.pos[:] = [g['lat'], g['lon'], g['alt']]
+                    _S.vel[:] = [g['spd'], g['crs'], 0.0]
+                    _S.gps_fix = g['fix']
+                    _S.gps_pending = None
+                    print(f"[gps] anchor  lat={g['lat']:.5f}  lon={g['lon']:.5f}"
+                          f"  alt={g['alt']:.1f}m  fix={int(g['fix'])}", flush=True)
+
+                pkt = _pack(jpeg_bytes, _S.pos, _S.vel, _S.acc, _S.gyr,
+                            _S.pitch, _S.roll, _S.yaw, _S.gps_fix)
 
             try:
                 sock.send(pkt, copy=False)
